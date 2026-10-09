@@ -389,6 +389,21 @@ func Test_parsePodsCpuAndMemory(t *testing.T) {
 			cpuPerTask: ptr.To(int32(8)),
 			memPerNode: ptr.To(int64(400)),
 		},
+		{
+			name: "fractional MiB limit rounds up",
+			args: args{
+				slurmJobComponent: &SlurmJobComponent{
+					Pods: corev1.PodList{
+						Items: []corev1.Pod{
+							podWithResources("1", "100Mi", "1", "100.5Mi"),
+						},
+					},
+					JobInfo: SlurmJobIRJobInfo{},
+				},
+			},
+			cpuPerTask: ptr.To(int32(1)),
+			memPerNode: ptr.To(int64(101)),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
