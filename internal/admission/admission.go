@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,6 +36,9 @@ type PodAdmission struct {
 	ManagedNamespaces        []string
 	ManagedNamespaceSelector *metav1.LabelSelector
 	DRARegistry              *dra.Registry
+	// MaxTerminationGracePeriodSeconds limits pod grace periods; zero means
+	// no limit.
+	MaxTerminationGracePeriodSeconds int64
 }
 
 func (r *PodAdmission) draRegistry() *dra.Registry {
@@ -131,6 +135,10 @@ func (r *PodAdmission) ValidateCreate(ctx context.Context, pod *corev1.Pod) (adm
 	}
 	if hasRequiredAffinity(pod) {
 		return nil, fmt.Errorf("spec.affinity's required fields are not supported by the slurm-bridge scheduler, use a Slurm partition or constraint instead")
+	}
+	if limit := r.MaxTerminationGracePeriodSeconds; limit > 0 &&
+		ptr.Deref(pod.Spec.TerminationGracePeriodSeconds, corev1.DefaultTerminationGracePeriodSeconds) > limit {
+		return nil, fmt.Errorf("spec.terminationGracePeriodSeconds must not exceed %d, the node epilog only holds the node for a bounded time while the pod shuts down", limit)
 	}
 	if err := validatePositiveResourceQuantities(pod); err != nil {
 		return nil, err

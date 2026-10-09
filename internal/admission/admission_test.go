@@ -552,8 +552,9 @@ func TestPodAdmission_ValidateCreate(t *testing.T) {
 		},
 	}
 	type fields struct {
-		SchedulerName     string
-		ManagedNamespaces []string
+		SchedulerName                    string
+		ManagedNamespaces                []string
+		MaxTerminationGracePeriodSeconds int64
 	}
 	type args struct {
 		ctx context.Context
@@ -983,6 +984,88 @@ func TestPodAdmission_ValidateCreate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "PodWithGracePeriodWithinMax",
+			fields: fields{
+				ManagedNamespaces:                []string{namespace},
+				MaxTerminationGracePeriodSeconds: 300,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec:       corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(300))},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "PodWithGracePeriodAboveMax",
+			fields: fields{
+				ManagedNamespaces:                []string{namespace},
+				MaxTerminationGracePeriodSeconds: 300,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec:       corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(301))},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "spec.terminationGracePeriodSeconds must not exceed 300",
+		},
+		{
+			name: "PodWithDefaultGracePeriodAboveMax",
+			fields: fields{
+				ManagedNamespaces:                []string{namespace},
+				MaxTerminationGracePeriodSeconds: 10,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "spec.terminationGracePeriodSeconds must not exceed 10",
+		},
+		{
+			name: "PodWithGracePeriodWithoutMax",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec:       corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(3600))},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "PodWithGracePeriodAboveMaxInUnmanagedNamespace",
+			fields: fields{
+				SchedulerName:                    SchedulerName,
+				ManagedNamespaces:                []string{namespace},
+				MaxTerminationGracePeriodSeconds: 300,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "unmanaged-ns"},
+					Spec: corev1.PodSpec{
+						SchedulerName:                 "other-scheduler",
+						TerminationGracePeriodSeconds: ptr.To(int64(3600)),
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
 			name: "PodWithDifferentSchedulerInUnmanagedNamespace",
 			fields: fields{
 				SchedulerName:     SchedulerName,
@@ -1009,9 +1092,10 @@ func TestPodAdmission_ValidateCreate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &PodAdmission{
-				Client:            fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
-				SchedulerName:     tt.fields.SchedulerName,
-				ManagedNamespaces: tt.fields.ManagedNamespaces,
+				Client:                           fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+				SchedulerName:                    tt.fields.SchedulerName,
+				ManagedNamespaces:                tt.fields.ManagedNamespaces,
+				MaxTerminationGracePeriodSeconds: tt.fields.MaxTerminationGracePeriodSeconds,
 			}
 			got, err := r.ValidateCreate(tt.args.ctx, tt.args.pod)
 			if (err != nil) != tt.wantErr {

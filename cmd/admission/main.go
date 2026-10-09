@@ -95,6 +95,10 @@ func main() {
 		setupLog.Error(err, "unable to parse config file", "file", flags.configFile)
 		os.Exit(1)
 	}
+	if err := cfg.Validate(); err != nil {
+		setupLog.Error(err, "invalid config file", "file", flags.configFile)
+		os.Exit(1)
+	}
 	draRegistry, err := cfg.DRARegistry()
 	if err != nil {
 		setupLog.Error(err, "unable to configure DRA device profiles")
@@ -130,11 +134,12 @@ func main() {
 		os.Exit(1)
 	}
 	podAdmission := admission.PodAdmission{
-		Client:                   mgr.GetClient(),
-		ManagedNamespaces:        cfg.ManagedNamespaces,
-		ManagedNamespaceSelector: cfg.ManagedNamespaceSelector,
-		SchedulerName:            cfg.SchedulerName,
-		DRARegistry:              draRegistry,
+		Client:                           mgr.GetClient(),
+		ManagedNamespaces:                cfg.ManagedNamespaces,
+		ManagedNamespaceSelector:         cfg.ManagedNamespaceSelector,
+		SchedulerName:                    cfg.SchedulerName,
+		DRARegistry:                      draRegistry,
+		MaxTerminationGracePeriodSeconds: cfg.EffectiveMaxTerminationGracePeriodSeconds(),
 	}
 	if err := podAdmission.SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "Pod")
