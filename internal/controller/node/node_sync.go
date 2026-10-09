@@ -72,7 +72,7 @@ func (r *NodeReconciler) syncTaint(ctx context.Context, req reconcile.Request) e
 	// Kubernetes node to compute that intersection.
 	if slurmNodeNameSet.Has(nodeutils.GetSlurmNodeName(node)) {
 		// Requeue until no longer a bridged node
-		durationStore.Push(node.Name, 30*time.Second)
+		durationStore.Push(req.String(), 30*time.Second)
 
 		// Taint bridged Kubernetes nodes
 		logger.V(1).Info("add taint to bridged node", "node", klog.KObj(node))
