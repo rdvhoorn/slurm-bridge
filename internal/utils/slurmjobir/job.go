@@ -46,9 +46,16 @@ func fromJobSpec(pods []corev1.Pod, jobSpec *batchv1.JobSpec) *SlurmJobComponent
 		// job isn't cut short below its requested deadline.
 		slurmJobComponent.JobInfo.TimeLimit = ptr.To(int32((*jobSpec.ActiveDeadlineSeconds + 59) / 60)) //nolint:gosec // disable G115
 	}
-	if jobSpec.Template.Spec.Resources != nil {
-		slurmJobComponent.JobInfo.CpuPerTask = ptr.To(int32(jobSpec.Template.Spec.Resources.Limits.Cpu().Value())) //nolint:gosec // disable G115
-		slurmJobComponent.JobInfo.MemPerNode = ptr.To(int64(GetMemoryFromQuantity(jobSpec.Template.Spec.Resources.Limits.Memory())))
+	if resources := jobSpec.Template.Spec.Resources; resources != nil {
+		// Only map strictly positive pod-level limits: a missing limit reads as
+		// 0, and a Slurm MemPerNode of 0 means all memory on the node, so leave
+		// it unset and let the partition default or pod values apply instead.
+		if cpu := resources.Limits.Cpu().Value(); cpu > 0 {
+			slurmJobComponent.JobInfo.CpuPerTask = ptr.To(int32(cpu)) //nolint:gosec // disable G115
+		}
+		if mem := GetMemoryFromQuantity(resources.Limits.Memory()); mem > 0 {
+			slurmJobComponent.JobInfo.MemPerNode = ptr.To(mem)
+		}
 	}
 
 	return slurmJobComponent
