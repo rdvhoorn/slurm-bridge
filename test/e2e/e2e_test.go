@@ -18,6 +18,10 @@ func TestScheduling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	placeholder, err := parseSlurmPlaceholderFromEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
 	requireNvidiaGPU, err := parseMockNVMLFromEnvironment()
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +66,8 @@ func TestScheduling(t *testing.T) {
 		// MCS isolation needs a native allocation with spare resources, so run
 		// after the other scheduling features have released their allocations.
 		_ = testEnv.Test(t, testHybridMCSIsolation())
+		// Holding and draining nodes would disrupt the scheduling features above.
+		_ = testEnv.Test(t, testBatchPlaceholderHold(placeholder))
 		// Changing GRES compatibility would disrupt the scheduling features above.
 		_ = testEnv.Test(t, testHybridGRESCompatibilityCondition())
 	}
