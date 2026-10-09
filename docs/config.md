@@ -246,6 +246,10 @@ and memory. Slurm still decides placement for both. In this mode:
   `OverSubscribe=EXCLUSIVE`. Bridge jobs leave sharing to the partition, so with
   `YES` or `FORCE` Slurm may run bridge pods and native jobs on the same cores.
   The scheduler logs a warning at startup if its default partition allows this.
+- With `schedulerConfig.requireCPUDevice: true`, the webhook requires every
+  container to request a core-bitmap CPU DeviceClass; a CPU limit is no longer
+  enough. The DRA CPU driver then pins each pod to the cores Slurm allocated,
+  which is the only way to keep pods off native jobs' cores.
 
 ```yaml
 # slurm-bridge values.yaml
@@ -283,6 +287,12 @@ Configure kubelet on each hybrid node to match:
   `enforceNodeAllocatable: [pods]`. Otherwise a pod can get stuck after Slurm
   allocates its job. Kubelet counts memory used by native jobs towards eviction,
   so fix a sizing mismatch rather than lowering eviction thresholds.
+
+The node controller checks this on each hybrid node and sets the
+`SlinkySlurmResourcesFit` node condition. When it is `False`, its message gives
+both sides' numbers. Lower Slurm's `RealMemory` or `CPUs`, reserve more with
+`MemSpecLimit` or `CpuSpecList`, or reduce kubelet's reservations or the other
+pods' requests.
 
 Co-resident mode has these limitations:
 

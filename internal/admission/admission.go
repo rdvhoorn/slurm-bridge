@@ -37,6 +37,9 @@ type PodAdmission struct {
 	DRARegistry              *dra.Registry
 	// CoResident requires the limits co-resident node sharing relies on.
 	CoResident bool
+	// RequireCPUDevice requires co-resident pods to request a core-bitmap
+	// DeviceClass instead of setting a CPU limit.
+	RequireCPUDevice bool
 }
 
 func (r *PodAdmission) draRegistry() *dra.Registry {
@@ -142,7 +145,7 @@ func (r *PodAdmission) ValidateCreate(ctx context.Context, pod *corev1.Pod) (adm
 		return nil, err
 	}
 	if r.CoResident {
-		if err := validateCoResidentLimits(pod, coreBitmapCPU); err != nil {
+		if err := validateCoResidentLimits(pod, coreBitmapCPU, r.RequireCPUDevice); err != nil {
 			return nil, err
 		}
 		if err := validateCoResidentAnnotations(nil, pod); err != nil {
@@ -335,7 +338,8 @@ func (r *PodAdmission) validateDRAResources(ctx context.Context, pod *corev1.Pod
 // on a co-resident node cannot use more than its Slurm reservation. Each
 // container must be bounded by a pod-level or container limit; a container
 // requesting a core-bitmap DeviceClass is bounded to its allocated CPUs instead.
-func validateCoResidentLimits(pod *corev1.Pod, coreBitmapCPU []corev1.ResourceName) error {
+// With requireCPUDevice, every container must request a core-bitmap DeviceClass.
+func validateCoResidentLimits(pod *corev1.Pod, coreBitmapCPU []corev1.ResourceName, requireCPUDevice bool) error {
 	podMemory, podCPU := false, false
 	if pod.Spec.Resources != nil {
 		podMemory = hasPositiveLimit(*pod.Spec.Resources, corev1.ResourceMemory)
@@ -348,6 +352,9 @@ func validateCoResidentLimits(pod *corev1.Pod, coreBitmapCPU []corev1.ResourceNa
 		requestsCoreBitmap := slices.ContainsFunc(coreBitmapCPU, func(name corev1.ResourceName) bool {
 			return resourceIsSet(container.Resources, name)
 		})
+		if requireCPUDevice && !requestsCoreBitmap {
+			return fmt.Errorf("requireCPUDevice requires container %q to request a core-bitmap DeviceClass, which pins it to the cores Slurm allocated and keeps it off native jobs' cores", container.Name)
+		}
 		if !podCPU && !hasPositiveLimit(container.Resources, corev1.ResourceCPU) && !requestsCoreBitmap {
 			return fmt.Errorf("co-resident node sharing requires a CPU limit on the pod or on container %q, or a core-bitmap DeviceClass request in it, so the pod can't exceed its Slurm reservation", container.Name)
 		}

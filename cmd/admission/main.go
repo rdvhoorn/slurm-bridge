@@ -140,6 +140,7 @@ func main() {
 		SchedulerName:            cfg.SchedulerName,
 		DRARegistry:              draRegistry,
 		CoResident:               cfg.NodeSharing == config.NodeSharingCoResident,
+		RequireCPUDevice:         cfg.RequireCPUDevice,
 	}
 	if err := podAdmission.SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "Pod")

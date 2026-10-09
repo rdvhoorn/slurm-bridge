@@ -61,6 +61,8 @@ type NodeReconciler struct {
 	SchedulerName string
 	SlurmClient   slurmclient.Client
 	EventCh       chan event.GenericEvent
+	// CoResident checks that hybrid nodes' Slurm CPUs and memory fit in Kubernetes.
+	CoResident bool
 
 	slurmControl  slurmcontrol.SlurmControlInterface
 	draRegistry   *dra.Registry
@@ -69,6 +71,7 @@ type NodeReconciler struct {
 
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;patch;watch
 // +kubebuilder:rbac:groups="",resources=nodes/status,verbs=patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceslices,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to

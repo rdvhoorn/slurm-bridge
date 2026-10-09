@@ -69,6 +69,7 @@ func testHybridCoResidentSharing(coResident bool) types.Feature {
 		Assess("job that does not fit waits for the other to end, in both orders", assessCoResidentWait).
 		Assess("exclusive pod waits for the whole node", assessCoResidentExclusive).
 		Assess("pod without a memory limit is rejected", assessCoResidentAdmission).
+		Assess("hybrid workers report whether Slurm's resources fit", assessCoResidentSizing).
 		Feature()
 }
 
@@ -248,6 +249,60 @@ type coResidentRun struct {
 	partition string
 	pods      []*corev1.Pod
 	nativeIDs []string
+}
+
+// assessCoResidentSizing checks that every hybrid worker reports whether the
+// CPUs and memory Slurm can allocate fit in Kubernetes. Kind workers reserve
+// nothing for the system, so the condition is usually False there; the check
+// is that it is set and quotes Slurm's own numbers.
+func assessCoResidentSizing(ctx context.Context, t *testing.T, config *envconf.Config) context.Context {
+	crClient, err := getControllerRuntimeClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := getSlurmControllerPod(ctx, crClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &coResidentRun{config: config, crClient: crClient, controller: controller}
+	workers := &corev1.NodeList{}
+	if err := crClient.List(ctx, workers, client.MatchingLabels{slurmBridgeWorkerLabel: "worker"}); err != nil {
+		t.Fatalf("list bridge workers: %v", err)
+	}
+	for i := range workers.Items {
+		name := workers.Items[i].Name
+		var condition corev1.NodeCondition
+		if err := wait.For(func(ctx context.Context) (bool, error) {
+			node := &corev1.Node{}
+			if err := crClient.Get(ctx, client.ObjectKey{Name: name}, node); err != nil {
+				return false, err
+			}
+			for _, c := range node.Status.Conditions {
+				if c.Type == wellknown.NodeConditionSlurmResourcesFit {
+					condition = c
+					return true, nil
+				}
+			}
+			return false, nil
+		}, wait.WithContext(ctx), wait.WithTimeout(slurmBridgeReadinessTimeout), wait.WithInterval(2*time.Second)); err != nil {
+			t.Fatalf("node %s has no %s condition: %v", name, wellknown.NodeConditionSlurmResourcesFit, err)
+		}
+		slurmNode, err := r.showNode(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("node %s: %s %s: %s", name, condition.Status, condition.Reason, condition.Message)
+		switch condition.Status {
+		case corev1.ConditionTrue:
+		case corev1.ConditionFalse:
+			if want := fmt.Sprintf("Slurm schedules %d CPUs and ", slurmNode.CPUs); !strings.Contains(condition.Message, want) {
+				t.Errorf("node %s condition message %q does not contain %q", name, condition.Message, want)
+			}
+		default:
+			t.Errorf("node %s condition is %s: %s", name, condition.Status, condition.Message)
+		}
+	}
+	return ctx
 }
 
 // newCoResidentRun picks an idle hybrid worker and registers the run's cleanup.
