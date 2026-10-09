@@ -33,6 +33,24 @@ tests:
       - matchRegex:
           path: spec.template.metadata.annotations["checksum/scheduler-config"]
           pattern: ^[0-9a-f]{64}$
+  - it: omits the placeholder settings by default
+    template: configmap.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*(placeholder|maxTerminationGracePeriodSeconds):'
+  - it: renders the batch placeholder settings when set
+    template: configmap.yaml
+    set:
+      schedulerConfig.placeholder: batch
+      schedulerConfig.maxTerminationGracePeriodSeconds: 120
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*placeholder: batch\s*$'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*maxTerminationGracePeriodSeconds: 120\s*$'
   - it: image pull policy is configurable
     template: scheduler/deployment.yaml
     set:

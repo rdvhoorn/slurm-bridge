@@ -31,5 +31,11 @@ data:
     {{- if .Values.schedulerConfig.clientBurst }}
     clientBurst: {{ .Values.schedulerConfig.clientBurst }}
     {{- end }}
+    {{- if .Values.schedulerConfig.placeholder }}
+    placeholder: {{ .Values.schedulerConfig.placeholder }}
+    {{- end }}
+    {{- if .Values.schedulerConfig.maxTerminationGracePeriodSeconds }}
+    maxTerminationGracePeriodSeconds: {{ .Values.schedulerConfig.maxTerminationGracePeriodSeconds }}
+    {{- end }}
     deviceProfiles:
       {{- toYaml .Values.sharedConfig.deviceProfiles | nindent 6 }}
