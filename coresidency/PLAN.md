@@ -198,8 +198,8 @@ of this section.
 - Every node in the bridge partition runs slurmd. A batch placeholder can't
   launch anywhere else.
 - `Epilog=` the hold script, with `PrologEpilogTimeout` > `HOLD_MAX`.
-- `PrologFlags=Alloc`, so every node of a multi-node placeholder runs the
-  epilog, not only the node with the batch script.
+- `PrologFlags=Alloc` is optional: on Slurm 26.05 every node of a
+  multi-node placeholder ran the epilog without it (`notes/spike.md` §5).
 - `CpuSpecList` set explicitly, so the reserved cores are known and can be
   matched on the Kubernetes side.
 
@@ -221,6 +221,11 @@ of this section.
   - The bridge scheduler also runs `NodeResourcesFit`. If Kubernetes has less
     room than Slurm thinks it can give, a pod gets stuck after Slurm has
     allocated it.
+- **slurmd in a pod** (slurm-operator NodeSets, kind): native jobs' cgroups
+  nest under the slurmd pod, which is BestEffort. Under memory pressure
+  kubelet evicts it first and every native job on the node dies with it.
+  Prefer host-installed slurmd on hybrid nodes; with a containerized slurmd,
+  this is an open risk (`notes/spike.md`, "Other observations").
 
 **Check:** the node controller sets a node condition when Slurm's schedulable
 CPU or memory is above Allocatable minus the requests of the other pods. It
