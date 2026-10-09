@@ -1,0 +1,29 @@
+---
+# Layer after slurm-bridge-common.yaml and slurm-bridge-hybrid.yaml for batch
+# placeholders. kind.sh installs the node epilog with:
+#   --set-file 'epilogScripts.bridge-hold\.sh=hack/epilog-bridge-hold.sh'
+controller:
+  extraConfMap:
+    # Longer than the epilog's HOLD_MAX.
+    PrologEpilogTimeout:
+      - 720
+nodesets:
+  slurm-bridge:
+    slurmd:
+      # The epilog lists the pod sandboxes on the node with crictl.
+      volumeMounts:
+        - name: crictl
+          mountPath: /usr/local/bin/crictl
+          readOnly: true
+        - name: containerd-sock
+          mountPath: /run/containerd/containerd.sock
+    podSpec:
+      volumes:
+        - name: crictl
+          hostPath:
+            path: /usr/local/bin/crictl
+            type: File
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket

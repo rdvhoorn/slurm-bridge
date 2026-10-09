@@ -40,6 +40,15 @@ SLURM_NODE_MODE=hybrid \
 make kind-start test-e2e
 ```
 
+[Batch placeholders](config.md#batch-placeholders) need hybrid nodes and their
+own cluster too. This also installs the hold epilog with a 120 s `HOLD_MAX`:
+
+```sh
+KIND_CLUSTER_NAME=slurm-bridge-batch \
+SLURM_NODE_MODE=hybrid SLURM_PLACEHOLDER=batch \
+make kind-start test-e2e
+```
+
 Select another supported Kubernetes version with `KUBERNETES_VERSION`:
 
 ```sh
