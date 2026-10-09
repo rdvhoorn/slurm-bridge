@@ -47,6 +47,9 @@ type Config struct {
 	// NodeSharing selects how bridge jobs share nodes with native Slurm jobs.
 	// Empty keeps time-only sharing; see NodeSharingCoResident.
 	NodeSharing string `json:"nodeSharing,omitempty" yaml:"nodeSharing,omitempty"`
+	// RequireCPUDevice requires co-resident pods to request a core-bitmap
+	// DeviceClass instead of setting a CPU limit.
+	RequireCPUDevice bool `json:"requireCPUDevice,omitempty" yaml:"requireCPUDevice,omitempty"`
 }
 
 // DeviceProfileConfig is the user-facing YAML representation of a DRA device
@@ -83,6 +86,9 @@ func (c *Config) Validate() error {
 	case "", NodeSharingCoResident:
 	default:
 		return fmt.Errorf("unsupported nodeSharing %q", c.NodeSharing)
+	}
+	if c.RequireCPUDevice && c.NodeSharing != NodeSharingCoResident {
+		return fmt.Errorf("requireCPUDevice requires nodeSharing %q", NodeSharingCoResident)
 	}
 	return nil
 }

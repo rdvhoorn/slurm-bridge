@@ -368,6 +368,15 @@ func TestConfig_ValidateScheduler(t *testing.T) {
 			config:  Config{NodeSharing: "coresident"},
 			wantErr: true,
 		},
+		{
+			name:   "co-resident requiring CPU device",
+			config: Config{NodeSharing: NodeSharingCoResident, RequireCPUDevice: true},
+		},
+		{
+			name:    "requiring CPU device without co-resident",
+			config:  Config{MCSLabel: "kubernetes", RequireCPUDevice: true},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

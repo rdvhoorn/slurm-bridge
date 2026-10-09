@@ -1556,6 +1556,52 @@ func TestPodAdmission_ValidateCreate_DRA(t *testing.T) {
 		}
 	})
 
+	t.Run("co-resident requiring CPU device", func(t *testing.T) {
+		cpuClass := &resourcev1.DeviceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeinfo.DraDriverCpu},
+			Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{
+				CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "dra.cpu"`},
+			}}},
+		}
+		cpuResource := corev1.ResourceName(resourcev1.ResourceDeviceClassPrefix + nodeinfo.DraDriverCpu)
+		for _, tt := range []struct {
+			name            string
+			resources       corev1.ResourceRequirements
+			wantErrContains string
+		}{
+			{
+				name: "core-bitmap request",
+				resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{cpuResource: resource.MustParse("1")},
+					Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+				},
+			},
+			{
+				name: "CPU limit",
+				resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				}},
+				wantErrContains: `requireCPUDevice requires container "work" to request a core-bitmap DeviceClass`,
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				pod := newPod()
+				pod.Spec.Containers[0].Resources = tt.resources
+				admission := newAdmission(cpuClass)
+				admission.CoResident = true
+				admission.RequireCPUDevice = true
+				_, err := admission.ValidateCreate(context.Background(), pod)
+				if tt.wantErrContains == "" && err != nil {
+					t.Fatalf("PodAdmission.ValidateCreate() error = %v", err)
+				}
+				if tt.wantErrContains != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErrContains)) {
+					t.Fatalf("PodAdmission.ValidateCreate() error = %v, want error containing %q", err, tt.wantErrContains)
+				}
+			})
+		}
+	})
+
 	t.Run("co-resident indexed-GRES device without CPU limit", func(t *testing.T) {
 		pod := newPod()
 		pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
