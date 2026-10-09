@@ -84,6 +84,11 @@ schedulerConfig:
   # node core by core and requires `mcsLabel: ""`. `exclusive: "true"`
   # still takes a whole node.
   nodeSharing: ""
+  # -- Require every co-resident pod container to request a core-bitmap CPU
+  # DeviceClass, such as `dra.cpu`, instead of setting a CPU limit. This pins
+  # pods to the cores Slurm allocated, keeping them off native jobs' cores.
+  # Requires `nodeSharing: coResident`.
+  requireCPUDevice: false
 
 # Configuration settings for the admission controller.
 admission:

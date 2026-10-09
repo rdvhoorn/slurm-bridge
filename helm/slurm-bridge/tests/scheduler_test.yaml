@@ -299,3 +299,20 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: '(?m)^\s*mcsLabel:\s*$'
+  - it: omits requireCPUDevice from shared configuration by default
+    template: configmap.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: requireCPUDevice
+  - it: renders requireCPUDevice into shared configuration
+    template: configmap.yaml
+    set:
+      schedulerConfig:
+        mcsLabel: ""
+        nodeSharing: coResident
+        requireCPUDevice: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*requireCPUDevice: true$'

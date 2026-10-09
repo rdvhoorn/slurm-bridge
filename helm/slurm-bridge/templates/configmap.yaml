@@ -34,5 +34,8 @@ data:
     {{- if .Values.schedulerConfig.nodeSharing }}
     nodeSharing: {{ .Values.schedulerConfig.nodeSharing }}
     {{- end }}
+    {{- if .Values.schedulerConfig.requireCPUDevice }}
+    requireCPUDevice: true
+    {{- end }}
     deviceProfiles:
       {{- toYaml .Values.sharedConfig.deviceProfiles | nindent 6 }}
