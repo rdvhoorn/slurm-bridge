@@ -14,6 +14,7 @@
     - [Topology](#topology)
     - [Hybrid Workload Isolation](#hybrid-workload-isolation)
       - [Production label authorization](#production-label-authorization)
+    - [Batch Placeholders](#batch-placeholders)
 
 <!-- mdformat-toc end -->
 
@@ -218,7 +219,82 @@ to keep Kubernetes workloads that bypass slurm-bridge off hybrid nodes.
 Operational or controller-driven cancellation must also keep a node unavailable
 to native Slurm work until its Kubernetes pods have actually stopped.
 
+[Batch placeholders](#batch-placeholders) close this gap when Slurm ends the job
+first.
+
+### Batch Placeholders
+
+By default, the bridge submits each pod's placeholder as an external job, which
+`slurmd` never launches. When Slurm ends such a job first, for example through
+`scancel`, preemption, or its time limit, its nodes become idle at once and run
+no epilog. Native Slurm work can then start while the pod is still shutting
+down: the bridge needs up to about 30 seconds to notice that the job ended, and
+the pod's grace period and `preStop` hooks come on top of that.
+
+With `placeholder: batch`, the bridge submits the placeholder as an ordinary
+batch job instead. It runs `sleep infinity`, discards its output, and is never
+requeued. When Slurm ends it, its nodes go `COMPLETING` and run the node epilog
+[`hack/epilog-bridge-hold.sh`][epilog-bridge-hold], which holds each node until
+the pod's sandboxes on it have stopped. Admission rejects pods whose
+`terminationGracePeriodSeconds` exceeds `maxTerminationGracePeriodSeconds`
+(default 300), because the epilog only holds the node for a bounded time.
+
+```yaml
+# slurm-bridge values.yaml
+schedulerConfig:
+  placeholder: batch
+  maxTerminationGracePeriodSeconds: 300
+```
+
+Install the epilog on every node in the bridge partition, either directly in
+`slurm.conf`:
+
+```conf
+# slurm.conf
+Epilog=/path/to/epilog-bridge-hold.sh
+PrologEpilogTimeout=720
+```
+
+or, with the slurm-operator chart, as an `epilogScripts` entry, which `slurmd`
+runs from its configless cache:
+
+```sh
+helm upgrade slurm oci://ghcr.io/slinkyproject/charts/slurm --reuse-values \
+  --set-file 'epilogScripts.bridge-hold\.sh=hack/epilog-bridge-hold.sh' \
+  --set 'controller.extraConfMap.PrologEpilogTimeout[0]=720'
+```
+
+- The epilog finds the pod's sandboxes with `crictl`, so `slurmd` needs `crictl`
+  and access to the node's CRI socket (`CONTAINER_RUNTIME_ENDPOINT`, default
+  `unix:///run/containerd/containerd.sock`).
+- The epilog waits at most `HOLD_MAX` seconds (default 600) and then fails,
+  which drains the node. `HOLD_MAX` must exceed
+  `maxTerminationGracePeriodSeconds` plus about 30 seconds, and
+  `PrologEpilogTimeout` must exceed `HOLD_MAX`.
+- `slurmd` discards the epilog's output, so on failure the epilog records why in
+  the node's drain reason (`epilog-bridge-hold: job <id>: ...`).
+- Slurm runs the epilog with a minimal environment. To change `HOLD_MAX`,
+  `NO_SHOW`, `CRICTL`, `SCONTROL`, or `CONTAINER_RUNTIME_ENDPOINT`, edit the
+  defaults at the top of the script, or add an `export` line after the shebang.
+- The epilog recognises a placeholder by its `slurm_bridge_gres_compatible`
+  constraint and waits up to `NO_SHOW` seconds (default 60) for its pod sandbox
+  to appear. It releases the nodes of other jobs at once.
+- `PrologFlags=Alloc` is optional. Slurm 26.05 already runs the epilog on every
+  node of a multi-node placeholder without it.
+
+This has costs:
+
+- While a pod shuts down, the whole node waits, not only the pod's cores.
+- A placeholder that ends before its pod sandbox exists keeps the node
+  `COMPLETING` for `NO_SHOW` seconds, even if no pod ever starts there.
+- The batch job runs as its Slurm user (`SlurmUser` unless the
+  `slurmjob.slinky.slurm.net/user-id` annotation is set), who must exist on the
+  node. If the launch fails, Slurm holds the job and drains the node.
+- If the bridge is down for longer than `HOLD_MAX`, nodes whose placeholder ends
+  in that time are drained.
+
 <!-- Links -->
 
+[epilog-bridge-hold]: ../hack/epilog-bridge-hold.sh
 [job-submit]: https://slurm.schedmd.com/job_submit_plugins.html
 [mcs]: https://slurm.schedmd.com/mcs.html
