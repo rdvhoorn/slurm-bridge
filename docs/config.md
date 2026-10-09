@@ -307,7 +307,8 @@ Co-resident mode has these limitations:
 - When a pod finishes, slurm-bridge cancels its Slurm job only after the pod has
   stopped. When Slurm ends the job first, for example at its time limit or on
   `scancel`, Slurm can start native work on the freed cores before the pod has
-  stopped.
+  stopped. Set [`placeholder: batch`](#batch-placeholders) to close this gap;
+  the scheduler logs a warning at startup when it is not set.
 
 ### Batch Placeholders
 
