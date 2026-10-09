@@ -31,6 +31,7 @@ import (
 	"github.com/SlinkyProject/slurm-client/pkg/object"
 	slurmtypes "github.com/SlinkyProject/slurm-client/pkg/types"
 
+	nodeutils "github.com/SlinkyProject/slurm-bridge/internal/controller/node/utils"
 	"github.com/SlinkyProject/slurm-bridge/internal/dra"
 	"github.com/SlinkyProject/slurm-bridge/internal/utils"
 	"github.com/SlinkyProject/slurm-bridge/internal/utils/testutils"
@@ -743,6 +744,149 @@ var _ = Describe("syncNodeRegistration() hybrid nodes", func() {
 		Expect(kubeClient.Get(ctx, client.ObjectKeyFromObject(node), updatedNode)).To(Succeed())
 		Expect(findNodeCondition(updatedNode.Status.Conditions, wellknown.NodeConditionSlurmGRESCompatible)).To(BeNil())
 		Expect(findNodeCondition(updatedNode.Status.Conditions, corev1.NodeReady)).NotTo(BeNil())
+	})
+})
+
+var _ = Describe("syncSlurmResourcesFit()", func() {
+	newPod := func(name, nodeName, scheduler string, phase corev1.PodPhase, cpu, memory string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: corev1.NamespaceDefault},
+			Spec: corev1.PodSpec{
+				NodeName:      nodeName,
+				SchedulerName: scheduler,
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse(cpu),
+						corev1.ResourceMemory: resource.MustParse(memory),
+					}},
+				}},
+			},
+			Status: corev1.PodStatus{Phase: phase},
+		}
+	}
+	// newNode returns a node carrying a stale resources-fit condition.
+	newNode := func() *corev1.Node {
+		return &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "hybrid-0"},
+			Status: corev1.NodeStatus{
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("8"),
+					corev1.ResourceMemory: resource.MustParse("16Gi"),
+				},
+				Conditions: []corev1.NodeCondition{
+					{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+					{Type: wellknown.NodeConditionSlurmResourcesFit, Status: corev1.ConditionFalse, Message: "stale"},
+				},
+			},
+		}
+	}
+	newSlurmNode := func(effectiveCPUs int32, realMemoryMB int64, state ...api.V0044NodeState) *slurmtypes.V0044Node {
+		return &slurmtypes.V0044Node{V0044Node: api.V0044Node{
+			Name:              ptr.To("hybrid-0"),
+			Cpus:              ptr.To(effectiveCPUs + 2),
+			EffectiveCpus:     ptr.To(effectiveCPUs),
+			RealMemory:        ptr.To(realMemoryMB + 1024),
+			SpecializedMemory: ptr.To(int64(1024)),
+			State:             ptr.To(state),
+		}}
+	}
+	getCondition := func(kubeClient client.Client, node *corev1.Node) *corev1.NodeCondition {
+		updatedNode := &corev1.Node{}
+		Expect(kubeClient.Get(ctx, client.ObjectKeyFromObject(node), updatedNode)).To(Succeed())
+		Expect(findNodeCondition(updatedNode.Status.Conditions, corev1.NodeReady)).NotTo(BeNil())
+		return findNodeCondition(updatedNode.Status.Conditions, wellknown.NodeConditionSlurmResourcesFit)
+	}
+
+	DescribeTable("reports whether Slurm's schedulable resources fit", func(coResident bool, effectiveCPUs int32, realMemoryMB int64, wantStatus corev1.ConditionStatus, wantMessage string) {
+		node := newNode()
+		kubeClient := fake.NewClientBuilder().
+			WithObjects(
+				node,
+				// Only the DaemonSet pod counts: 7.5 CPUs and 15360 MiB remain.
+				newPod("daemonset", node.Name, corev1.DefaultSchedulerName, corev1.PodRunning, "500m", "1Gi"),
+				newPod("bridge", node.Name, schedulerName, corev1.PodRunning, "4", "8Gi"),
+				newPod("succeeded", node.Name, corev1.DefaultSchedulerName, corev1.PodSucceeded, "4", "8Gi"),
+				newPod("failed", node.Name, corev1.DefaultSchedulerName, corev1.PodFailed, "4", "8Gi"),
+				newPod("other-node", "worker-1", corev1.DefaultSchedulerName, corev1.PodRunning, "4", "8Gi"),
+			).
+			WithIndex(&corev1.Pod{}, nodeutils.IndexFieldPodNodeName, nodeutils.IndexPodByNodeName).
+			Build()
+		slurmClient := slurmclientfake.NewClientBuilder().
+			WithObjects(newSlurmNode(effectiveCPUs, realMemoryMB, api.V0044NodeStateIDLE)).
+			Build()
+		r := NewReconciler(kubeClient, slurmClient, schedulerName, make(chan event.GenericEvent), nil)
+		r.CoResident = coResident
+
+		Expect(r.syncSlurmResourcesFit(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: node.Name}})).To(Succeed())
+		condition := getCondition(kubeClient, node)
+		if !coResident {
+			Expect(condition).To(BeNil())
+			return
+		}
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Status).To(Equal(wantStatus))
+		Expect(condition.Message).To(ContainSubstring(wantMessage))
+	},
+		Entry("fits, ignoring bridge-scheduled and terminal pods", true, int32(7), int64(15000), corev1.ConditionTrue, "fit in Kubernetes Allocatable"),
+		Entry("CPU exceeds", true, int32(8), int64(15000), corev1.ConditionFalse,
+			"Slurm schedules 8 CPUs and 15000 MiB; Kubernetes has 7.5 CPUs and 15360 MiB available"),
+		Entry("memory exceeds", true, int32(7), int64(15400), corev1.ConditionFalse,
+			"Slurm schedules 7 CPUs and 15400 MiB; Kubernetes has 7.5 CPUs and 15360 MiB available"),
+		Entry("removed when co-resident sharing is off", false, int32(8), int64(15400), corev1.ConditionStatus(""), ""),
+	)
+
+	DescribeTable("removes the condition from nodes that are not hybrid", func(labeled bool, slurmNodes ...*slurmtypes.V0044Node) {
+		node := newNode()
+		if labeled {
+			node.Labels = map[string]string{wellknown.LabelExternalNode: "true"}
+		}
+		kubeClient := fake.NewClientBuilder().WithObjects(node).Build()
+		builder := slurmclientfake.NewClientBuilder()
+		for _, slurmNode := range slurmNodes {
+			builder = builder.WithObjects(slurmNode)
+		}
+		r := NewReconciler(kubeClient, builder.Build(), schedulerName, make(chan event.GenericEvent), nil)
+		r.CoResident = true
+
+		Expect(r.syncSlurmResourcesFit(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: node.Name}})).To(Succeed())
+		Expect(getCondition(kubeClient, node)).To(BeNil())
+	},
+		Entry("labeled node", true, newSlurmNode(7, 15000, api.V0044NodeStateIDLE)),
+		Entry("external node", false, newSlurmNode(7, 15000, api.V0044NodeStateIDLE, api.V0044NodeStateEXTERNAL)),
+		Entry("missing Slurm node", false),
+	)
+
+	It("is set even when the DRA inventory cannot be verified", func() {
+		node := newNode()
+		resourceSlice := &resourcev1.ResourceSlice{
+			ObjectMeta: metav1.ObjectMeta{Name: "hybrid-0-gpus"},
+			Spec: resourcev1.ResourceSliceSpec{
+				Driver:   "gpu.example.com",
+				NodeName: ptr.To(node.Name),
+				Pool: resourcev1.ResourcePool{
+					Name:               node.Name,
+					Generation:         1,
+					ResourceSliceCount: 2,
+				},
+				Devices: []resourcev1.Device{{Name: "gpu-0"}},
+			},
+		}
+		kubeClient := fake.NewClientBuilder().
+			WithObjects(node, resourceSlice).
+			WithIndex(&corev1.Pod{}, nodeutils.IndexFieldPodNodeName, nodeutils.IndexPodByNodeName).
+			Build()
+		slurmClient := slurmclientfake.NewClientBuilder().
+			WithObjects(newSlurmNode(7, 15000, api.V0044NodeStateIDLE)).
+			Build()
+		r := NewReconciler(kubeClient, slurmClient, schedulerName, make(chan event.GenericEvent), testutils.DRARegistryWithExampleGPU())
+		r.CoResident = true
+
+		err := r.Sync(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: node.Name}})
+		Expect(err).To(MatchError(ContainSubstring("generation 1 is incomplete: found 1 of 2 ResourceSlices")))
+		condition := getCondition(kubeClient, node)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Status).To(Equal(corev1.ConditionTrue))
 	})
 })
 

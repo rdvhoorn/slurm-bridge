@@ -35,6 +35,10 @@ func (r *NodeReconciler) Sync(ctx context.Context, req reconcile.Request) error 
 		errs = append(errs, err)
 	}
 
+	if err := r.syncSlurmResourcesFit(ctx, req); err != nil {
+		errs = append(errs, err)
+	}
+
 	if err := r.syncTaint(ctx, req); err != nil {
 		errs = append(errs, err)
 	}
@@ -289,6 +293,36 @@ func (r *NodeReconciler) syncNodeRegistration(ctx context.Context, req reconcile
 		)
 		return err
 	}
+}
+
+// syncSlurmResourcesFit sets the resources-fit condition on co-resident hybrid
+// nodes, independently of their GRES compatibility, and clears it from every
+// other node, including all nodes when co-resident sharing is off.
+func (r *NodeReconciler) syncSlurmResourcesFit(ctx context.Context, req reconcile.Request) error {
+	node := &corev1.Node{}
+	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	hybrid := false
+	if _, hasLabel := node.GetLabels()[wellknown.LabelExternalNode]; r.CoResident && !hasLabel {
+		exists, err := r.slurmControl.NodeExists(ctx, node)
+		if err != nil {
+			return err
+		}
+		isExternal, err := r.slurmControl.IsNodeExternal(ctx, node)
+		if err != nil {
+			return err
+		}
+		hybrid = exists && !isExternal
+	}
+	if !hybrid {
+		return r.clearNodeCondition(ctx, node, wellknown.NodeConditionSlurmResourcesFit)
+	}
+	return r.syncSlurmResourcesFitCondition(ctx, node)
 }
 
 func (r *NodeReconciler) nodeRegistrationInventories(ctx context.Context, node *corev1.Node) (*nodeinfo.NodeInfo, []dra.GRESInventory, error) {
