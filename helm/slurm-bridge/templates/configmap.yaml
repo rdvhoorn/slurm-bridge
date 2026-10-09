@@ -31,5 +31,8 @@ data:
     {{- if .Values.schedulerConfig.clientBurst }}
     clientBurst: {{ .Values.schedulerConfig.clientBurst }}
     {{- end }}
+    {{- if .Values.schedulerConfig.nodeSharing }}
+    nodeSharing: {{ .Values.schedulerConfig.nodeSharing }}
+    {{- end }}
     deviceProfiles:
       {{- toYaml .Values.sharedConfig.deviceProfiles | nindent 6 }}

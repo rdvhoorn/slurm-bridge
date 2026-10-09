@@ -30,37 +30,62 @@ import (
 )
 
 func Test_sharedFromExclusiveAnnotation(t *testing.T) {
+	sharedNone := &[]api.V0044JobDescMsgShared{api.V0044JobDescMsgSharedNone}
 	tests := []struct {
 		name              string
 		slurmJobComponent *slurmjobir.SlurmJobComponent
-		wantShared        api.V0044JobDescMsgShared
+		coResident        bool
+		want              *[]api.V0044JobDescMsgShared
 	}{
 		{
 			name:              "nil component defaults to exclusive",
 			slurmJobComponent: nil,
-			wantShared:        api.V0044JobDescMsgSharedNone,
+			want:              sharedNone,
 		},
 		{
 			name:              "component with Exclusive nil defaults to exclusive",
 			slurmJobComponent: &slurmjobir.SlurmJobComponent{},
-			wantShared:        api.V0044JobDescMsgSharedNone,
+			want:              sharedNone,
 		},
 		{
 			name:              "component Exclusive true",
 			slurmJobComponent: &slurmjobir.SlurmJobComponent{JobInfo: slurmjobir.SlurmJobIRJobInfo{Exclusive: ptr.To(true)}},
-			wantShared:        api.V0044JobDescMsgSharedNone,
+			want:              sharedNone,
 		},
 		{
 			name:              "component Exclusive false uses MCS sharing",
 			slurmJobComponent: &slurmjobir.SlurmJobComponent{JobInfo: slurmjobir.SlurmJobIRJobInfo{Exclusive: ptr.To(false)}},
-			wantShared:        api.V0044JobDescMsgSharedMcs,
+			want:              &[]api.V0044JobDescMsgShared{api.V0044JobDescMsgSharedMcs},
+		},
+		{
+			name:              "co-resident nil component defaults to omitted",
+			slurmJobComponent: nil,
+			coResident:        true,
+			want:              nil,
+		},
+		{
+			name:              "co-resident component with Exclusive nil defaults to omitted",
+			slurmJobComponent: &slurmjobir.SlurmJobComponent{},
+			coResident:        true,
+			want:              nil,
+		},
+		{
+			name:              "co-resident component Exclusive true",
+			slurmJobComponent: &slurmjobir.SlurmJobComponent{JobInfo: slurmjobir.SlurmJobIRJobInfo{Exclusive: ptr.To(true)}},
+			coResident:        true,
+			want:              sharedNone,
+		},
+		{
+			name:              "co-resident component Exclusive false omits shared",
+			slurmJobComponent: &slurmjobir.SlurmJobComponent{JobInfo: slurmjobir.SlurmJobIRJobInfo{Exclusive: ptr.To(false)}},
+			coResident:        true,
+			want:              nil,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sharedFromExclusiveAnnotation(tt.slurmJobComponent)
-			if got == nil || len(*got) != 1 || (*got)[0] != tt.wantShared {
-				t.Errorf("sharedFromExclusiveAnnotation() = %v, want [%v]", got, tt.wantShared)
+			if got := sharedFromExclusiveAnnotation(tt.slurmJobComponent, tt.coResident); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("sharedFromExclusiveAnnotation() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -616,14 +641,38 @@ func Test_realSlurmControl_SubmitJob(t *testing.T) {
 	}
 
 	type fields struct {
-		Client    client.Client
-		mcsLabel  string
-		partition string
+		Client     client.Client
+		mcsLabel   string
+		partition  string
+		coResident bool
 	}
 	type args struct {
 		ctx        context.Context
 		pod        *corev1.Pod
 		slurmJobIR *slurmjobir.SlurmJobIR
+	}
+	// submittedFields fails the submission unless its JSON has the wanted
+	// values; an empty want means the key must be omitted, not empty.
+	submittedFields := func(want map[string]string) client.Client {
+		return fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, obj object.Object, req any, opts ...client.CreateOption) error {
+				obj.(*slurmtypes.V0044JobInfo).JobId = ptr.To(int32(1))
+				payload, err := json.Marshal(req.(api.V0044JobSubmitReq).Job)
+				if err != nil {
+					return err
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(payload, &fields); err != nil {
+					return err
+				}
+				for key, value := range want {
+					if got, present := fields[key]; string(got) != value || present != (value != "") {
+						return fmt.Errorf("%s = %s (present %t), want %q", key, got, present, value)
+					}
+				}
+				return nil
+			},
+		}).Build()
 	}
 	tests := []struct {
 		name    string
@@ -848,13 +897,67 @@ func Test_realSlurmControl_SubmitJob(t *testing.T) {
 			want:    []int32{1},
 			wantErr: false,
 		},
+		{
+			name: "Submit external job upstream default sends SharedNone and MCS label",
+			fields: fields{
+				mcsLabel: "kubernetes",
+				Client:   submittedFields(map[string]string{"shared": `["none"]`, "mcs_label": `"kubernetes"`}),
+			},
+			args: args{
+				ctx:        context.Background(),
+				pod:        pod.DeepCopy(),
+				slurmJobIR: slurmJobIR(slurmjobir.SlurmJobIRJobInfo{}),
+			},
+			want: []int32{1},
+		},
+		{
+			name: "Submit external job co-resident default omits shared and MCS label",
+			fields: fields{
+				coResident: true,
+				Client:     submittedFields(map[string]string{"shared": "", "mcs_label": ""}),
+			},
+			args: args{
+				ctx:        context.Background(),
+				pod:        pod.DeepCopy(),
+				slurmJobIR: slurmJobIR(slurmjobir.SlurmJobIRJobInfo{}),
+			},
+			want: []int32{1},
+		},
+		{
+			name: "Submit external job co-resident Exclusive true yields SharedNone",
+			fields: fields{
+				coResident: true,
+				Client:     submittedFields(map[string]string{"shared": `["none"]`, "mcs_label": ""}),
+			},
+			args: args{
+				ctx:        context.Background(),
+				pod:        pod.DeepCopy(),
+				slurmJobIR: slurmJobIR(slurmjobir.SlurmJobIRJobInfo{Exclusive: ptr.To(true)}),
+			},
+			want: []int32{1},
+		},
+		{
+			name: "Submit external job co-resident Exclusive false with MCS label omits shared",
+			fields: fields{
+				mcsLabel:   "kubernetes",
+				coResident: true,
+				Client:     submittedFields(map[string]string{"shared": "", "mcs_label": `"kubernetes"`}),
+			},
+			args: args{
+				ctx:        context.Background(),
+				pod:        pod.DeepCopy(),
+				slurmJobIR: slurmJobIR(slurmjobir.SlurmJobIRJobInfo{Exclusive: ptr.To(false)}),
+			},
+			want: []int32{1},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &realSlurmControl{
-				Client:    tt.fields.Client,
-				mcsLabel:  tt.fields.mcsLabel,
-				partition: tt.fields.partition,
+				Client:     tt.fields.Client,
+				mcsLabel:   tt.fields.mcsLabel,
+				partition:  tt.fields.partition,
+				coResident: tt.fields.coResident,
 			}
 			got, err := r.SubmitJob(tt.args.ctx, tt.args.pod, tt.args.slurmJobIR)
 			if (err != nil) != tt.wantErr {
@@ -869,12 +972,17 @@ func Test_realSlurmControl_SubmitJob(t *testing.T) {
 
 func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		exclusive *bool
+		name       string
+		exclusive  *bool
+		mcsLabel   string
+		coResident bool
 	}{
-		{name: "default exclusive"},
-		{name: "exclusive", exclusive: ptr.To(true)},
-		{name: "MCS", exclusive: ptr.To(false)},
+		{name: "default exclusive", mcsLabel: "kubernetes"},
+		{name: "exclusive", exclusive: ptr.To(true), mcsLabel: "kubernetes"},
+		{name: "MCS", exclusive: ptr.To(false), mcsLabel: "kubernetes"},
+		{name: "co-resident default", coResident: true},
+		{name: "co-resident exclusive", exclusive: ptr.To(true), coResident: true},
+		{name: "co-resident non-exclusive", exclusive: ptr.To(false), coResident: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pod := st.MakePod().Name("pending").Namespace("slurm-bridge").
@@ -892,7 +1000,8 @@ func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 			}
 			updates := 0
 			r := &realSlurmControl{
-				mcsLabel: "kubernetes",
+				mcsLabel:   tt.mcsLabel,
+				coResident: tt.coResident,
 				Client: fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
 					Update: func(ctx context.Context, obj object.Object, req any, opts ...client.UpdateOption) error {
 						updates++
@@ -913,8 +1022,8 @@ func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 						if shared, present := fields["shared"]; present {
 							t.Errorf("pending-job update sends shared=%s; want the field omitted to preserve isolation", shared)
 						}
-						if ptr.Deref(desc.McsLabel, "") != "kubernetes" {
-							t.Errorf("update lost the MCS label: %v", desc.McsLabel)
+						if label, present := fields["mcs_label"]; present != (tt.mcsLabel != "") || ptr.Deref(desc.McsLabel, "") != tt.mcsLabel {
+							t.Errorf("update sends mcs_label=%s, want %q", label, tt.mcsLabel)
 						}
 						if desc.ExcludedNodes == nil || !slices.Equal(*desc.ExcludedNodes, ir.Components[0].JobInfo.ExcNodes) {
 							t.Errorf("excluded nodes were not updated: %v", desc.ExcludedNodes)
@@ -971,11 +1080,44 @@ func Test_realSlurmControl_SubmitJobRejectsMultipleComponents(t *testing.T) {
 	}
 }
 
+func TestPartitionOversubscribes(t *testing.T) {
+	tests := []struct {
+		name      string
+		partition string
+		want      bool
+		wantErr   bool
+	}{
+		{name: "OverSubscribe unset", partition: `{"name":"slurm-bridge"}`},
+		{name: "OverSubscribe=EXCLUSIVE", partition: `{"name":"slurm-bridge","maximums":{"oversubscribe":{"jobs":0,"flags":[]}}}`},
+		{name: "OverSubscribe=NO", partition: `{"name":"slurm-bridge","maximums":{"oversubscribe":{"jobs":1,"flags":[]}}}`},
+		{name: "OverSubscribe=YES:4", partition: `{"name":"slurm-bridge","maximums":{"oversubscribe":{"jobs":4,"flags":[]}}}`, want: true},
+		{name: "OverSubscribe=FORCE:1", partition: `{"name":"slurm-bridge","maximums":{"oversubscribe":{"jobs":1,"flags":["force"]}}}`, want: true},
+		{name: "partition not found", partition: `{"name":"other"}`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			partition := &slurmtypes.V0044PartitionInfo{}
+			if err := json.Unmarshal([]byte(tt.partition), &partition.V0044PartitionInfo); err != nil {
+				t.Fatal(err)
+			}
+			c := fake.NewClientBuilder().WithObjects(partition).Build()
+			got, err := PartitionOversubscribes(context.Background(), c, "slurm-bridge")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("PartitionOversubscribes() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("PartitionOversubscribes() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewControl(t *testing.T) {
 	type args struct {
 		client    client.Client
 		mcsLabel  string
 		partition string
+		opts      []Option
 	}
 	tests := []struct {
 		name string
@@ -995,10 +1137,23 @@ func TestNewControl(t *testing.T) {
 				partition: "slurm-bridge",
 			},
 		},
+		{
+			name: "NewControl returns co-resident",
+			args: args{
+				client:    fake.NewFakeClient(),
+				partition: "slurm-bridge",
+				opts:      []Option{WithCoResident()},
+			},
+			want: &realSlurmControl{
+				Client:     fake.NewFakeClient(),
+				partition:  "slurm-bridge",
+				coResident: true,
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewControl(tt.args.client, tt.args.mcsLabel, tt.args.partition); !reflect.DeepEqual(got, tt.want) {
+			if got := NewControl(tt.args.client, tt.args.mcsLabel, tt.args.partition, tt.args.opts...); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("NewControl() = %v, want %v", got, tt.want)
 			}
 		})

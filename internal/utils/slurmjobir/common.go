@@ -33,7 +33,14 @@ func ParseSlurmJobId(input string) int32 {
 	return int32(out) //nolint:gosec // disable G115
 }
 
+// GetMemoryFromQuantity converts quantity to MiB for the slurm job IR,
+// rounding up so the Slurm reservation is never below the Kubernetes value.
 func GetMemoryFromQuantity(quantity *resource.Quantity) int64 {
+	const mebibyte = 1024 * 1024
 	val := quantity.Value()
-	return val / 1048576 // value for 1024x1024 to follow what we need for slurm job IR
+	mib := val / mebibyte
+	if val%mebibyte > 0 {
+		mib++
+	}
+	return mib
 }

@@ -95,8 +95,7 @@ func parseUserAnnotations(slurmJobComponent *SlurmJobComponent, anno map[string]
 			if err != nil {
 				return err
 			}
-			val := rs.Value()
-			val /= 1048576 // value for 1024x1024 to follow what we need for slurm job IR
+			val := GetMemoryFromQuantity(&rs)
 			slurmJobComponent.JobInfo.MemPerNode = &val
 		case wellknown.AnnotationMinNodes:
 			num, err := ConvStrTo32(value)

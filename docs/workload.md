@@ -277,11 +277,12 @@ integers. CPU and memory accept Kubernetes quantities. `timelimit` accepts a
 duration with a unit suffix (`s`, `m`, `h`, `d`, `w`), one of Slurm's `--time`
 formats (`MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, `D-HH:MM:SS`), or a bare
 integer, which is read as minutes; sub-minute values are rounded up to one
-minute because Slurm's time limit has minute granularity. Exclusive placement is
-the default. `exclusive: "false"` always requests MCS-category sharing; the
-resulting external job uses Slurm's `Shared=mcs` mode and requires a configured
-`schedulerConfig.mcsLabel`. Because Slurm's `mcs/label` plugin does not
-authorize label use, production clusters must also reserve that label from
+minute because Slurm's time limit has minute granularity. Unless
+[co-resident mode](config.md#co-resident-nodes) is enabled, exclusive placement
+is the default and `exclusive: "false"` always requests MCS-category sharing;
+the resulting external job uses Slurm's `Shared=mcs` mode and requires a
+configured `schedulerConfig.mcsLabel`. Because Slurm's `mcs/label` plugin does
+not authorize label use, production clusters must also reserve that label from
 native users as described in
 [Production label authorization](config.md#production-label-authorization).
 

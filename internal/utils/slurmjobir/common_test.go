@@ -107,6 +107,41 @@ func Test_GetMemoryFromQuantity(t *testing.T) {
 			},
 			want: 1,
 		},
+		{
+			name: "Exact MiB",
+			args: args{
+				input: resource.MustParse("100Mi"),
+			},
+			want: 100,
+		},
+		{
+			name: "Fractional MiB rounds up",
+			args: args{
+				input: resource.MustParse("100.5Mi"),
+			},
+			want: 101,
+		},
+		{
+			name: "One byte over MiB rounds up",
+			args: args{
+				input: *resource.NewQuantity(1024*1024+1, resource.BinarySI),
+			},
+			want: 2,
+		},
+		{
+			name: "Below one MiB rounds up",
+			args: args{
+				input: resource.MustParse("1k"),
+			},
+			want: 1,
+		},
+		{
+			name: "Zero",
+			args: args{
+				input: resource.MustParse("0"),
+			},
+			want: 0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

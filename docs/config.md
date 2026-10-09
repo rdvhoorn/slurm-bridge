@@ -14,6 +14,7 @@
     - [Topology](#topology)
     - [Hybrid Workload Isolation](#hybrid-workload-isolation)
       - [Production label authorization](#production-label-authorization)
+    - [Co-resident Nodes](#co-resident-nodes)
 
 <!-- mdformat-toc end -->
 
@@ -79,10 +80,11 @@ Hybrid nodes run kubelet and `slurmd` on the same physical host. In this mode,
 slurm-operator manages the Slurm nodes with a `Nodeset`, and bridge jobs run on
 the Slurm nodes registered by those `slurmd` pods.
 
-Hybrid nodes share capacity between workload managers over time. A physical node
-must not run a native Slurm user workload and a Slurm-bridge-managed Kubernetes
-user workload simultaneously. System components such as kubelet, `slurmd`, CNI,
-device plugins, and monitoring DaemonSets are expected exceptions.
+Hybrid nodes share capacity between workload managers over time, unless
+[co-resident mode](#co-resident-nodes) is enabled. A physical node must not run
+a native Slurm user workload and a Slurm-bridge-managed Kubernetes user workload
+simultaneously. System components such as kubelet, `slurmd`, CNI, device
+plugins, and monitoring DaemonSets are expected exceptions.
 
 For example, a DaemonSet-mode `Nodeset` can place one `slurmd` pod on each
 Kubernetes worker node selected for bridge scheduling:
@@ -177,9 +179,10 @@ topology.
 
 ### Hybrid Workload Isolation
 
-Bridge jobs receive exclusive whole-node Slurm allocations by default. Workloads
-requesting `slurmjob.slinky.slurm.net/exclusive: "false"` are always submitted
-with `Shared=mcs` and the configured `schedulerConfig.mcsLabel`. This allows
+Unless [co-resident mode](#co-resident-nodes) is enabled, bridge jobs receive
+exclusive whole-node Slurm allocations by default, and workloads requesting
+`slurmjob.slinky.slurm.net/exclusive: "false"` are always submitted with
+`Shared=mcs` and the configured `schedulerConfig.mcsLabel`. This allows
 bridge-managed Kubernetes workloads in the same MCS category to share a node
 without enabling unprotected sharing with native Slurm jobs.
 
@@ -217,6 +220,80 @@ use the `slinky.slurm.net/managed-node` `NoExecute` taint and admission policy
 to keep Kubernetes workloads that bypass slurm-bridge off hybrid nodes.
 Operational or controller-driven cancellation must also keep a node unavailable
 to native Slurm work until its Kubernetes pods have actually stopped.
+
+### Co-resident Nodes
+
+Set `schedulerConfig.nodeSharing: coResident` to let bridge pods and native
+Slurm jobs run on the same hybrid node at the same time, each on its own cores
+and memory. Slurm still decides placement for both. In this mode:
+
+- Bridge jobs are non-exclusive by default and are submitted without a `shared`
+  value, so Slurm packs them beside native jobs one core at a time.
+  `slurmjob.slinky.slurm.net/exclusive: "true"` still requests a whole node.
+- MCS is not used. The scheduler refuses to start unless
+  `schedulerConfig.mcsLabel` is `""`; also remove the MCS settings from
+  `slurm.conf`.
+- The admission webhook requires every container to be bounded by a memory
+  limit, and by a CPU limit or a request for a core-bitmap CPU DeviceClass such
+  as `dra.cpu`. A pod-level limit bounds all containers. The kernel enforces
+  limits, not requests, so without them a pod could use more than Slurm reserved
+  for it. Guaranteed QoS pods meet this requirement.
+- The webhook rejects the `cpu-per-task` and `mem-per-node` annotations, since
+  the Slurm reservation must match the limits. It can't see these annotations on
+  an owning workload object, such as a JobSet, LeaderWorkerSet, or PodGroup,
+  rather than on the pod template; don't use them there in this mode.
+- Every partition that bridge jobs use must be `OverSubscribe=NO` or
+  `OverSubscribe=EXCLUSIVE`. Bridge jobs leave sharing to the partition, so with
+  `YES` or `FORCE` Slurm may run bridge pods and native jobs on the same cores.
+  The scheduler logs a warning at startup if its default partition allows this.
+
+```yaml
+# slurm-bridge values.yaml
+schedulerConfig:
+  mcsLabel: ""
+  nodeSharing: coResident
+```
+
+Slurm must schedule memory, confine native jobs to their cores and memory, and
+never place two jobs on the same core. Reserve system cores explicitly:
+
+```conf
+# slurm.conf
+SelectTypeParameters=CR_Core_Memory
+TaskPlugin=task/cgroup
+NodeName=... CpuSpecList=0-1
+PartitionName=slurm-bridge ... OverSubscribe=NO
+```
+
+```conf
+# cgroup.conf
+ConstrainCores=yes
+ConstrainRAMSpace=yes
+```
+
+Configure kubelet on each hybrid node to match:
+
+- Use CPU manager policy `none`. The `static` policy would hand pods cores that
+  Slurm allocated to native jobs.
+- Set `reservedSystemCPUs` to the node's Slurm `CpuSpecList`, so both sides
+  reserve the same cores.
+- Slurm's schedulable CPU and memory (`RealMemory` minus `MemSpecLimit`) must
+  fit in kubelet Allocatable minus the requests of pods that slurm-bridge does
+  not manage, such as DaemonSets, CNI, and DRA drivers. Set
+  `enforceNodeAllocatable: [pods]`. Otherwise a pod can get stuck after Slurm
+  allocates its job. Kubelet counts memory used by native jobs towards eviction,
+  so fix a sizing mismatch rather than lowering eviction thresholds.
+
+Co-resident mode has these limitations:
+
+- Slurm's cgroups keep native jobs on their own cores and memory, and total CPU
+  and memory are never oversubscribed. A pod's CPU limit bounds how much CPU it
+  uses, not which cores it runs on, so pods can still cause noisy-neighbour
+  effects, such as cache contention and scheduling jitter, for native jobs.
+- When a pod finishes, slurm-bridge cancels its Slurm job only after the pod has
+  stopped. When Slurm ends the job first, for example at its time limit or on
+  `scancel`, Slurm can start native work on the freed cores before the pod has
+  stopped.
 
 <!-- Links -->
 

@@ -20,10 +20,13 @@ import (
 	"github.com/SlinkyProject/slurm-bridge/internal/wellknown"
 )
 
-func testHybridMCSIsolation() types.Feature {
+func testHybridMCSIsolation(coResident bool) types.Feature {
 	return features.New("Hybrid MCS isolation").
 		WithLabel(slurmNodeModeLabel, string(slurmNodeModeHybrid)).
 		Assess("native and Kubernetes workloads remain isolated in both submission orders", func(ctx context.Context, t *testing.T, config *envconf.Config) context.Context {
+			if coResident {
+				t.Skip("co-resident node sharing does not use MCS; see the Co-resident sharing feature")
+			}
 			crClient, err := getControllerRuntimeClient(config)
 			if err != nil {
 				t.Fatal(err)
