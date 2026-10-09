@@ -53,6 +53,26 @@ func TestParseMockNVMLFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseCoResidentFromEnvironment(t *testing.T) {
+	t.Setenv(slurmNodeSharingEnvironment, "")
+	if coResident, err := parseCoResidentFromEnvironment(slurmNodeModeHybrid); err != nil || coResident {
+		t.Fatalf("parseCoResidentFromEnvironment() = %v, %v by default, want false", coResident, err)
+	}
+
+	t.Setenv(slurmNodeSharingEnvironment, "coResident")
+	if coResident, err := parseCoResidentFromEnvironment(slurmNodeModeHybrid); err != nil || !coResident {
+		t.Fatalf("parseCoResidentFromEnvironment() = %v, %v, want true", coResident, err)
+	}
+	if _, err := parseCoResidentFromEnvironment(slurmNodeModeExternal); err == nil {
+		t.Fatal("parseCoResidentFromEnvironment() accepted co-resident external nodes")
+	}
+
+	t.Setenv(slurmNodeSharingEnvironment, "coresident")
+	if _, err := parseCoResidentFromEnvironment(slurmNodeModeHybrid); err == nil {
+		t.Fatal("parseCoResidentFromEnvironment() accepted an invalid value")
+	}
+}
+
 func TestParseE2ECleanupFromEnvironment(t *testing.T) {
 	t.Setenv(e2eCleanupEnvironment, "")
 	enabled, err := parseE2ECleanupFromEnvironment()

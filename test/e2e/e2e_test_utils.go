@@ -37,11 +37,13 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/features"
 	"sigs.k8s.io/e2e-framework/pkg/types"
 
+	bridgeconfig "github.com/SlinkyProject/slurm-bridge/internal/config"
 	"github.com/SlinkyProject/slurm-bridge/internal/wellknown"
 )
 
 const (
 	slurmNodeModeEnvironment    = "SLURM_NODE_MODE"
+	slurmNodeSharingEnvironment = "SLURM_NODE_SHARING"
 	mockNVMLEnvironment         = "MOCK_NVML"
 	e2eCleanupEnvironment       = "E2E_CLEANUP"
 	e2eKubeContextEnvironment   = "E2E_KUBE_CONTEXT"
@@ -123,6 +125,24 @@ func parseSlurmNodeModeFromEnvironment() (slurmNodeMode, error) {
 		value = string(slurmNodeModeExternal)
 	}
 	return parseSlurmNodeMode(value)
+}
+
+// parseCoResidentFromEnvironment reports whether the cluster was created with
+// co-resident node sharing, which only applies to hybrid nodes.
+func parseCoResidentFromEnvironment(nodeMode slurmNodeMode) (bool, error) {
+	switch value := os.Getenv(slurmNodeSharingEnvironment); value {
+	case "":
+		return false, nil
+	case bridgeconfig.NodeSharingCoResident:
+		if nodeMode != slurmNodeModeHybrid {
+			return false, fmt.Errorf("%s=%s requires %s=%s",
+				slurmNodeSharingEnvironment, value, slurmNodeModeEnvironment, slurmNodeModeHybrid)
+		}
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be empty or %q, got %q",
+			slurmNodeSharingEnvironment, bridgeconfig.NodeSharingCoResident, value)
+	}
 }
 
 func parseMockNVMLFromEnvironment() (bool, error) {
@@ -449,15 +469,10 @@ func testSlurmBridgeJobScheduling() types.Feature {
 					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{
 						{
-							Name:    jobName,
-							Image:   "busybox:stable",
-							Command: []string{"sh", "-c", "sleep 3"},
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("1"),
-									corev1.ResourceMemory: resource.MustParse("100Mi"),
-								},
-							},
+							Name:      jobName,
+							Image:     "busybox:stable",
+							Command:   []string{"sh", "-c", "sleep 3"},
+							Resources: slurmTestResources("1", "100Mi"),
 						},
 					},
 				},
@@ -599,15 +614,10 @@ func testSlurmBridgePodScheduling() types.Feature {
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{
 				{
-					Name:    podName,
-					Image:   "busybox:stable",
-					Command: []string{"sh", "-c", "sleep 100"},
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("1"),
-							corev1.ResourceMemory: resource.MustParse("100Mi"),
-						},
-					},
+					Name:      podName,
+					Image:     "busybox:stable",
+					Command:   []string{"sh", "-c", "sleep 100"},
+					Resources: slurmTestResources("1", "100Mi"),
 				},
 			},
 		},
