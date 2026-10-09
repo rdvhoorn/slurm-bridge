@@ -294,7 +294,11 @@ func New(ctx context.Context, obj runtime.Object, handle fwk.Handle) (fwk.Plugin
 		logger.Error(err, "unable to create slurm client")
 		return nil, err
 	}
-	sc := slurmcontrol.NewControl(slurmClient, cfg.MCSLabel, cfg.Partition)
+	var opts []slurmcontrol.Option
+	if cfg.Placeholder == config.PlaceholderBatch {
+		opts = append(opts, slurmcontrol.WithBatchPlaceholder())
+	}
+	sc := slurmcontrol.NewControl(slurmClient, cfg.MCSLabel, cfg.Partition, opts...)
 	plugin := &SlurmBridge{
 		Client:        kubeClient,
 		schedulerName: cfg.SchedulerName,

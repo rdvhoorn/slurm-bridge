@@ -116,8 +116,9 @@ type SlurmControlInterface interface {
 // RealPodControl is the default implementation of SlurmControlInterface.
 type realSlurmControl struct {
 	client.Client
-	mcsLabel  string
-	partition string
+	mcsLabel         string
+	partition        string
+	batchPlaceholder bool
 }
 
 type NodeResources struct {
@@ -481,6 +482,22 @@ func (r *realSlurmControl) buildJobDesc(jobComponent slurmjobir.SlurmJobComponen
 		jobDesc.Shared = sharedFromExclusiveAnnotation(&jobComponent)
 	}
 
+	// A batch placeholder is launched by slurmd, so when Slurm ends it the
+	// nodes go COMPLETING and the node epilog can hold them until the pod is
+	// gone. An external job frees its nodes at once. Send the launch settings
+	// only at submission: they never change, and leaving them out keeps a
+	// pending-job update to the scheduling fields it is meant to change.
+	if r.batchPlaceholder {
+		jobDesc.Flags = nil
+		if !update {
+			// slurmctld rejects a batch job with an empty environment.
+			jobDesc.Environment = &api.V0044StringArray{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+			jobDesc.Requeue = ptr.To(false)
+			jobDesc.Script = ptr.To("#!/bin/sh\nexec sleep infinity\n")
+			jobDesc.StandardOutput = ptr.To("/dev/null")
+		}
+	}
+
 	if len(excludedNodes) == 0 && !update {
 		jobDesc.ExcludedNodes = nil
 	} else {
@@ -577,10 +594,25 @@ func (r *realSlurmControl) getNodeExtra(ctx context.Context, nodeName string) (s
 
 var _ SlurmControlInterface = &realSlurmControl{}
 
-func NewControl(client client.Client, mcsLabel string, partition string) SlurmControlInterface {
-	return &realSlurmControl{
+// Option configures the SlurmControlInterface returned by NewControl.
+type Option func(*realSlurmControl)
+
+// WithBatchPlaceholder submits placeholders as batch jobs instead of external
+// jobs, so the node epilog can hold their nodes until the pod is gone.
+func WithBatchPlaceholder() Option {
+	return func(r *realSlurmControl) {
+		r.batchPlaceholder = true
+	}
+}
+
+func NewControl(client client.Client, mcsLabel string, partition string, opts ...Option) SlurmControlInterface {
+	r := &realSlurmControl{
 		Client:    client,
 		mcsLabel:  mcsLabel,
 		partition: partition,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
