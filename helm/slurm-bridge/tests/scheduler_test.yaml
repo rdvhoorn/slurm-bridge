@@ -280,3 +280,22 @@ tests:
       - equal:
           path: spec.template.spec.volumes[2].secret.items[0].key
           value: SLURM_JWT
+  - it: omits nodeSharing from shared configuration by default
+    template: configmap.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: nodeSharing
+  - it: renders co-resident node sharing into shared configuration
+    template: configmap.yaml
+    set:
+      schedulerConfig:
+        mcsLabel: ""
+        nodeSharing: coResident
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*nodeSharing: coResident$'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^\s*mcsLabel:\s*$'

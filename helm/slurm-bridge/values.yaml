@@ -79,6 +79,11 @@ schedulerConfig:
   # -- (integer) Set the scheduler plugin's own Kubernetes client Burst.
   # Defaults to kube-scheduler's own client Burst (100) when unset.
   clientBurst: null
+  # -- Set how bridge jobs share hybrid nodes with native Slurm jobs. Empty
+  # keeps time-only sharing. `coResident` lets pods and native jobs share a
+  # node core by core and requires `mcsLabel: ""`. `exclusive: "true"`
+  # still takes a whole node.
+  nodeSharing: ""
 
 # Configuration settings for the admission controller.
 admission:
