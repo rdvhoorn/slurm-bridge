@@ -641,10 +641,11 @@ func Test_realSlurmControl_SubmitJob(t *testing.T) {
 	}
 
 	type fields struct {
-		Client     client.Client
-		mcsLabel   string
-		partition  string
-		coResident bool
+		Client           client.Client
+		mcsLabel         string
+		partition        string
+		coResident       bool
+		batchPlaceholder bool
 	}
 	type args struct {
 		ctx        context.Context
@@ -911,6 +912,81 @@ func Test_realSlurmControl_SubmitJob(t *testing.T) {
 			want: []int32{1},
 		},
 		{
+			name: "Submit external job sets EXTERNAL_JOB and no batch script",
+			fields: fields{
+				Client: func() client.Client {
+					f := interceptor.Funcs{
+						Create: func(ctx context.Context, obj object.Object, req any, opts ...client.CreateOption) error {
+							obj.(*slurmtypes.V0044JobInfo).JobId = ptr.To(int32(1))
+							job := req.(api.V0044JobSubmitReq).Job
+							want := &[]api.V0044JobDescMsgFlags{api.V0044JobDescMsgFlagsEXTERNALJOB}
+							if !reflect.DeepEqual(job.Flags, want) {
+								return fmt.Errorf("Flags = %v, want %v", job.Flags, want)
+							}
+							if job.Script != nil || job.Environment != nil || job.Requeue != nil || job.StandardOutput != nil {
+								return fmt.Errorf("expected no batch launch settings, got script=%v environment=%v requeue=%v stdout=%v",
+									job.Script, job.Environment, job.Requeue, job.StandardOutput)
+							}
+							return nil
+						},
+					}
+					return fake.NewClientBuilder().
+						WithInterceptorFuncs(f).
+						Build()
+				}(),
+			},
+			args: args{
+				ctx:        context.Background(),
+				pod:        pod.DeepCopy(),
+				slurmJobIR: slurmJobIR(slurmjobir.SlurmJobIRJobInfo{}),
+			},
+			want:    []int32{1},
+			wantErr: false,
+		},
+		{
+			name: "Submit batch placeholder",
+			fields: fields{
+				batchPlaceholder: true,
+				Client: func() client.Client {
+					f := interceptor.Funcs{
+						Create: func(ctx context.Context, obj object.Object, req any, opts ...client.CreateOption) error {
+							obj.(*slurmtypes.V0044JobInfo).JobId = ptr.To(int32(1))
+							job := req.(api.V0044JobSubmitReq).Job
+							if job.Flags != nil && slices.Contains(*job.Flags, api.V0044JobDescMsgFlagsEXTERNALJOB) {
+								return fmt.Errorf("expected no EXTERNAL_JOB flag, got %v", *job.Flags)
+							}
+							if got := ptr.Deref(job.Script, ""); got != "#!/bin/sh\nexec sleep infinity\n" {
+								return fmt.Errorf("Script = %q, want sleep infinity", got)
+							}
+							if job.Environment == nil || len(*job.Environment) == 0 {
+								return fmt.Errorf("expected Environment to be set, got %v", job.Environment)
+							}
+							if job.Requeue == nil || *job.Requeue {
+								return fmt.Errorf("expected Requeue false, got %v", job.Requeue)
+							}
+							if got := ptr.Deref(job.StandardOutput, ""); got != "/dev/null" {
+								return fmt.Errorf("StandardOutput = %q, want /dev/null", got)
+							}
+							if got := ptr.Deref(job.Constraints, ""); got != wellknown.SlurmFeatureGRESCompatible {
+								return fmt.Errorf("Constraints = %q, want %q", got, wellknown.SlurmFeatureGRESCompatible)
+							}
+							return nil
+						},
+					}
+					return fake.NewClientBuilder().
+						WithInterceptorFuncs(f).
+						Build()
+				}(),
+			},
+			args: args{
+				ctx:        context.Background(),
+				pod:        pod.DeepCopy(),
+				slurmJobIR: slurmJobIR(slurmjobir.SlurmJobIRJobInfo{}),
+			},
+			want:    []int32{1},
+			wantErr: false,
+		},
+		{
 			name: "Submit external job co-resident default omits shared and MCS label",
 			fields: fields{
 				coResident: true,
@@ -954,10 +1030,11 @@ func Test_realSlurmControl_SubmitJob(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &realSlurmControl{
-				Client:     tt.fields.Client,
-				mcsLabel:   tt.fields.mcsLabel,
-				partition:  tt.fields.partition,
-				coResident: tt.fields.coResident,
+				Client:           tt.fields.Client,
+				mcsLabel:         tt.fields.mcsLabel,
+				partition:        tt.fields.partition,
+				coResident:       tt.fields.coResident,
+				batchPlaceholder: tt.fields.batchPlaceholder,
 			}
 			got, err := r.SubmitJob(tt.args.ctx, tt.args.pod, tt.args.slurmJobIR)
 			if (err != nil) != tt.wantErr {
@@ -972,10 +1049,11 @@ func Test_realSlurmControl_SubmitJob(t *testing.T) {
 
 func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 	for _, tt := range []struct {
-		name       string
-		exclusive  *bool
-		mcsLabel   string
-		coResident bool
+		name             string
+		exclusive        *bool
+		mcsLabel         string
+		coResident       bool
+		batchPlaceholder bool
 	}{
 		{name: "default exclusive", mcsLabel: "kubernetes"},
 		{name: "exclusive", exclusive: ptr.To(true), mcsLabel: "kubernetes"},
@@ -983,6 +1061,7 @@ func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 		{name: "co-resident default", coResident: true},
 		{name: "co-resident exclusive", exclusive: ptr.To(true), coResident: true},
 		{name: "co-resident non-exclusive", exclusive: ptr.To(false), coResident: true},
+		{name: "batch placeholder", mcsLabel: "kubernetes", batchPlaceholder: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pod := st.MakePod().Name("pending").Namespace("slurm-bridge").
@@ -1000,8 +1079,9 @@ func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 			}
 			updates := 0
 			r := &realSlurmControl{
-				mcsLabel:   tt.mcsLabel,
-				coResident: tt.coResident,
+				mcsLabel:         tt.mcsLabel,
+				coResident:       tt.coResident,
+				batchPlaceholder: tt.batchPlaceholder,
 				Client: fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
 					Update: func(ctx context.Context, obj object.Object, req any, opts ...client.UpdateOption) error {
 						updates++
@@ -1024,6 +1104,15 @@ func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 						}
 						if label, present := fields["mcs_label"]; present != (tt.mcsLabel != "") || ptr.Deref(desc.McsLabel, "") != tt.mcsLabel {
 							t.Errorf("update sends mcs_label=%s, want %q", label, tt.mcsLabel)
+						}
+						// Batch launch settings are fixed at submission.
+						for _, key := range []string{"script", "environment", "standard_output", "requeue"} {
+							if value, present := fields[key]; present {
+								t.Errorf("pending-job update sends %s=%s; want the field omitted", key, value)
+							}
+						}
+						if _, present := fields["flags"]; present == tt.batchPlaceholder {
+							t.Errorf("pending-job update flags present = %t, want %t", present, !tt.batchPlaceholder)
 						}
 						if desc.ExcludedNodes == nil || !slices.Equal(*desc.ExcludedNodes, ir.Components[0].JobInfo.ExcNodes) {
 							t.Errorf("excluded nodes were not updated: %v", desc.ExcludedNodes)
@@ -1148,6 +1237,21 @@ func TestNewControl(t *testing.T) {
 				Client:     fake.NewFakeClient(),
 				partition:  "slurm-bridge",
 				coResident: true,
+			},
+		},
+		{
+			name: "NewControl with WithBatchPlaceholder",
+			args: args{
+				client:    fake.NewFakeClient(),
+				mcsLabel:  "kubernetes",
+				partition: "slurm-bridge",
+				opts:      []Option{WithBatchPlaceholder()},
+			},
+			want: &realSlurmControl{
+				Client:           fake.NewFakeClient(),
+				mcsLabel:         "kubernetes",
+				partition:        "slurm-bridge",
+				batchPlaceholder: true,
 			},
 		},
 	}

@@ -304,6 +304,9 @@ func New(ctx context.Context, obj runtime.Object, handle fwk.Handle) (fwk.Plugin
 			logger.Info("WARNING: co-resident node sharing needs partition OverSubscribe=NO or EXCLUSIVE, otherwise Slurm may run bridge and native jobs on the same cores", "partition", cfg.Partition)
 		}
 	}
+	if cfg.Placeholder == config.PlaceholderBatch {
+		opts = append(opts, slurmcontrol.WithBatchPlaceholder())
+	}
 	sc := slurmcontrol.NewControl(slurmClient, cfg.MCSLabel, cfg.Partition, opts...)
 	plugin := &SlurmBridge{
 		Client:        kubeClient,

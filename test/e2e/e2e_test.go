@@ -22,6 +22,10 @@ func TestScheduling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	placeholder, err := parseSlurmPlaceholderFromEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
 	requireNvidiaGPU, err := parseMockNVMLFromEnvironment()
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +72,8 @@ func TestScheduling(t *testing.T) {
 		_ = testEnv.Test(t, testHybridMCSIsolation(coResident))
 		// Co-resident sharing needs idle nodes for the same reason.
 		_ = testEnv.Test(t, testHybridCoResidentSharing(coResident))
+		// Holding and draining nodes would disrupt the scheduling features above.
+		_ = testEnv.Test(t, testBatchPlaceholderHold(placeholder))
 		// Changing GRES compatibility would disrupt the scheduling features above.
 		_ = testEnv.Test(t, testHybridGRESCompatibilityCondition())
 	}

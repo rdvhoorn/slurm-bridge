@@ -37,5 +37,11 @@ data:
     {{- if .Values.schedulerConfig.requireCPUDevice }}
     requireCPUDevice: true
     {{- end }}
+    {{- if .Values.schedulerConfig.placeholder }}
+    placeholder: {{ .Values.schedulerConfig.placeholder }}
+    {{- end }}
+    {{- if .Values.schedulerConfig.maxTerminationGracePeriodSeconds }}
+    maxTerminationGracePeriodSeconds: {{ .Values.schedulerConfig.maxTerminationGracePeriodSeconds }}
+    {{- end }}
     deviceProfiles:
       {{- toYaml .Values.sharedConfig.deviceProfiles | nindent 6 }}

@@ -89,6 +89,14 @@ schedulerConfig:
   # pods to the cores Slurm allocated, keeping them off native jobs' cores.
   # Requires `nodeSharing: coResident`.
   requireCPUDevice: false
+  # -- (string) Set the kind of Slurm job submitted for each pod: `external`
+  # (the default when unset) or `batch`. Batch placeholders need a Slurm node
+  # epilog that holds the node until the pod has stopped.
+  # Ref: https://github.com/SlinkyProject/slurm-bridge/blob/main/docs/config.md#batch-placeholders
+  placeholder: null
+  # -- (integer) Set the largest pod `terminationGracePeriodSeconds` admission
+  # accepts with batch placeholders. Defaults to 300 when unset.
+  maxTerminationGracePeriodSeconds: null
 
 # Configuration settings for the admission controller.
 admission:

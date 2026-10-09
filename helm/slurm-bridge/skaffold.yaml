@@ -72,6 +72,17 @@ profiles:
       - op: add
         path: /deploy/helm/releases/0/overrides/schedulerConfig/mcsLabel
         value: ''
+  - name: batch-placeholder
+    activation:
+      - env: 'SLURM_PLACEHOLDER=^batch$'
+    patches:
+      - op: add
+        path: /deploy/helm/releases/0/overrides/schedulerConfig/placeholder
+        value: batch
+      # Below the HOLD_MAX that hack/kind.sh gives the e2e epilog.
+      - op: add
+        path: /deploy/helm/releases/0/overrides/schedulerConfig/maxTerminationGracePeriodSeconds
+        value: 60
 portForward:
   - resourceType: deployment
     resourceName: slurm-bridge-scheduler

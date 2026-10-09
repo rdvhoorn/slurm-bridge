@@ -134,13 +134,14 @@ func main() {
 		os.Exit(1)
 	}
 	podAdmission := admission.PodAdmission{
-		Client:                   mgr.GetClient(),
-		ManagedNamespaces:        cfg.ManagedNamespaces,
-		ManagedNamespaceSelector: cfg.ManagedNamespaceSelector,
-		SchedulerName:            cfg.SchedulerName,
-		DRARegistry:              draRegistry,
-		CoResident:               cfg.NodeSharing == config.NodeSharingCoResident,
-		RequireCPUDevice:         cfg.RequireCPUDevice,
+		Client:                           mgr.GetClient(),
+		ManagedNamespaces:                cfg.ManagedNamespaces,
+		ManagedNamespaceSelector:         cfg.ManagedNamespaceSelector,
+		SchedulerName:                    cfg.SchedulerName,
+		DRARegistry:                      draRegistry,
+		MaxTerminationGracePeriodSeconds: cfg.EffectiveMaxTerminationGracePeriodSeconds(),
+		CoResident:                       cfg.NodeSharing == config.NodeSharingCoResident,
+		RequireCPUDevice:                 cfg.RequireCPUDevice,
 	}
 	if err := podAdmission.SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "Pod")
