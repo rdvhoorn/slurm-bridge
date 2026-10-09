@@ -303,6 +303,9 @@ func New(ctx context.Context, obj runtime.Object, handle fwk.Handle) (fwk.Plugin
 		} else if oversubscribes {
 			logger.Info("WARNING: co-resident node sharing needs partition OverSubscribe=NO or EXCLUSIVE, otherwise Slurm may run bridge and native jobs on the same cores", "partition", cfg.Partition)
 		}
+		if cfg.Placeholder != config.PlaceholderBatch {
+			logger.Info("WARNING: co-resident node sharing without placeholder: batch lets native jobs start on a node before the pod of a job Slurm ended has stopped")
+		}
 	}
 	if cfg.Placeholder == config.PlaceholderBatch {
 		opts = append(opts, slurmcontrol.WithBatchPlaceholder())
