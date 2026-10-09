@@ -27,6 +27,10 @@ const (
 	DefaultClientBurst int     = 100
 )
 
+// NodeSharingCoResident lets bridge pods and native Slurm jobs share a node at
+// the same time, each on its own cores and memory.
+const NodeSharingCoResident = "coResident"
+
 type Config struct {
 	SchedulerName            string                `json:"schedulerName" yaml:"schedulerName"`
 	SlurmRestApi             string                `json:"slurmRestApi" yaml:"slurmRestApi"`
@@ -40,6 +44,9 @@ type Config struct {
 	// Zero means unset and defaults to DefaultClientQPS/DefaultClientBurst.
 	ClientQPS   float32 `json:"clientQPS,omitempty" yaml:"clientQPS,omitempty"`
 	ClientBurst int     `json:"clientBurst,omitempty" yaml:"clientBurst,omitempty"`
+	// NodeSharing selects how bridge jobs share nodes with native Slurm jobs.
+	// Empty keeps time-only sharing; see NodeSharingCoResident.
+	NodeSharing string `json:"nodeSharing,omitempty" yaml:"nodeSharing,omitempty"`
 }
 
 // DeviceProfileConfig is the user-facing YAML representation of a DRA device
@@ -70,7 +77,28 @@ func (c *Config) EffectiveClientQPSBurst() (qps float32, burst int) {
 	return qps, burst
 }
 
+// Validate checks the settings shared by the scheduler and admission.
+func (c *Config) Validate() error {
+	switch c.NodeSharing {
+	case "", NodeSharingCoResident:
+	default:
+		return fmt.Errorf("unsupported nodeSharing %q", c.NodeSharing)
+	}
+	return nil
+}
+
 func (c *Config) ValidateScheduler() error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	// Co-resident jobs must not carry an MCS label: with MCS node filtering
+	// configured in Slurm, it would keep native jobs off the node.
+	if c.NodeSharing == NodeSharingCoResident {
+		if strings.TrimSpace(c.MCSLabel) != "" {
+			return errors.New(`scheduler config mcsLabel must be "" when nodeSharing is coResident`)
+		}
+		return nil
+	}
 	if strings.TrimSpace(c.MCSLabel) == "" {
 		return errors.New("scheduler config mcsLabel must not be empty")
 	}

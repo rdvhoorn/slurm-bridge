@@ -100,6 +100,16 @@ clientBurst: 150
 			wantErr: false,
 		},
 		{
+			name: "Test nodeSharing",
+			args: args{
+				in: []byte(`nodeSharing: coResident`),
+			},
+			want: &Config{
+				NodeSharing: NodeSharingCoResident,
+			},
+			wantErr: false,
+		},
+		{
 			name: "Test managedNamespaceSelector",
 			args: args{
 				in: []byte(`
@@ -333,6 +343,29 @@ func TestConfig_ValidateScheduler(t *testing.T) {
 		{
 			name:    "whitespace MCS label",
 			config:  Config{MCSLabel: "  "},
+			wantErr: true,
+		},
+		{
+			name:   "co-resident without MCS label",
+			config: Config{NodeSharing: NodeSharingCoResident},
+		},
+		{
+			name:    "co-resident with MCS label",
+			config:  Config{NodeSharing: NodeSharingCoResident, MCSLabel: "kubernetes"},
+			wantErr: true,
+		},
+		{
+			name:   "co-resident with whitespace MCS label",
+			config: Config{NodeSharing: NodeSharingCoResident, MCSLabel: "  "},
+		},
+		{
+			name:    "unknown node sharing",
+			config:  Config{NodeSharing: "oversubscribe", MCSLabel: "kubernetes"},
+			wantErr: true,
+		},
+		{
+			name:    "node sharing is case-sensitive",
+			config:  Config{NodeSharing: "coresident"},
 			wantErr: true,
 		},
 	}

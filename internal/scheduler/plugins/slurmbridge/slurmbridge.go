@@ -294,7 +294,17 @@ func New(ctx context.Context, obj runtime.Object, handle fwk.Handle) (fwk.Plugin
 		logger.Error(err, "unable to create slurm client")
 		return nil, err
 	}
-	sc := slurmcontrol.NewControl(slurmClient, cfg.MCSLabel, cfg.Partition)
+	var opts []slurmcontrol.Option
+	if cfg.NodeSharing == config.NodeSharingCoResident {
+		opts = append(opts, slurmcontrol.WithCoResident())
+		// Only warn: partitions can change and jobs can select another one.
+		if oversubscribes, err := slurmcontrol.PartitionOversubscribes(ctx, slurmClient, cfg.Partition); err != nil {
+			logger.Error(err, "unable to check partition OverSubscribe", "partition", cfg.Partition)
+		} else if oversubscribes {
+			logger.Info("WARNING: co-resident node sharing needs partition OverSubscribe=NO or EXCLUSIVE, otherwise Slurm may run bridge and native jobs on the same cores", "partition", cfg.Partition)
+		}
+	}
+	sc := slurmcontrol.NewControl(slurmClient, cfg.MCSLabel, cfg.Partition, opts...)
 	plugin := &SlurmBridge{
 		Client:        kubeClient,
 		schedulerName: cfg.SchedulerName,
