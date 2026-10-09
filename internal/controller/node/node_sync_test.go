@@ -6,6 +6,7 @@ package node
 import (
 	"context"
 	"errors"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -198,6 +199,7 @@ var _ = Describe("syncTaint()", func() {
 			isTainted := taints.TaintExists(checkNode.Spec.Taints, taint)
 			Expect(isTainted).To(BeFalse())
 			Expect(k8sClient.patchCalls).To(Equal(0))
+			Expect(durationStore.Peek(req.String())).To(BeZero())
 		})
 
 		It("Should taint bridged node", func() {
@@ -219,6 +221,9 @@ var _ = Describe("syncTaint()", func() {
 			isTainted := taints.TaintExists(checkNode.Spec.Taints, taint)
 			Expect(isTainted).To(BeTrue())
 			Expect(k8sClient.patchCalls).To(Equal(1))
+
+			By("Check requeue")
+			Expect(durationStore.Pop(req.String())).To(Equal(30 * time.Second))
 
 			By("syncTaint() again")
 			err = controllerReconciler.syncTaint(ctx, req)
