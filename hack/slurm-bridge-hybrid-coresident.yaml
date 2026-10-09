@@ -1,0 +1,31 @@
+---
+# SPDX-FileCopyrightText: Copyright (C) SchedMD LLC.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Co-resident node sharing (docs/config.md#co-resident-nodes). Layered after
+# slurm-bridge-hybrid.yaml when SLURM_NODE_SHARING=coResident.
+configFiles:
+  # Replaces the operator's generated cgroup.conf, so repeat its settings.
+  cgroup.conf: |
+    CgroupPlugin=cgroup/v2
+    IgnoreSystemd=yes
+    ConstrainCores=yes
+    ConstrainRAMSpace=yes
+controller:
+  extraConfMap:
+    # Co-resident jobs do not use MCS. The chart skips empty entries, and an
+    # empty list, unlike null, is kept by later --reuse-values upgrades.
+    MCSPlugin: []
+    MCSParameters: []
+    SelectTypeParameters:
+      - CR_Core_Memory
+    # ProctrackType already defaults to proctrack/cgroup.
+    TaskPlugin:
+      - task/cgroup
+nodesets:
+  slurm-bridge:
+    # TODO: Reserve system cores with CpuSpecList, matched by kubelet's
+    # reservedSystemCPUs. Kind workers share one kernel, so it is left out.
+    partition:
+      configMap:
+        OverSubscribe: "NO"
