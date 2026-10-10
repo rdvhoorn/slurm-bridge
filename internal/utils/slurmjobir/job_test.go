@@ -252,6 +252,112 @@ func Test_translator_fromJob(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "Job with only a pod-level CPU limit leaves MemPerNode unset",
+			fields: fields{
+				Reader: func() client.Reader {
+					scheme := runtime.NewScheme()
+					utilruntime.Must(kubescheme.AddToScheme(scheme))
+					utilruntime.Must(batchv1.AddToScheme(scheme))
+					job := newJob("foo")
+					delete(job.Spec.Template.Spec.Resources.Limits, corev1.ResourceMemory)
+					return fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+						job,
+						newJobPod("foo", "foo"),
+					).Build()
+				}(),
+				ctx: context.Background(),
+			},
+			args: args{
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: metav1.NamespaceDefault,
+						Labels:    map[string]string{batchv1.JobNameLabel: "foo"},
+					},
+				},
+				rootPOM: &metav1.PartialObjectMetadata{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: metav1.NamespaceDefault,
+					},
+				},
+			},
+			want: &SlurmJobIR{
+				Components: []SlurmJobComponent{
+					{
+						JobInfo: SlurmJobIRJobInfo{
+							MinNodes:   ptr.To(int32(1)),
+							CpuPerTask: ptr.To(int32(22)),
+							// MemPerNode intentionally unset: 0 in Slurm means all node memory.
+						},
+						Pods: corev1.PodList{
+							Items: []corev1.Pod{{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      "foo",
+									Namespace: metav1.NamespaceDefault,
+									Labels:    map[string]string{batchv1.JobNameLabel: "foo"},
+								},
+							}},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Job with only a pod-level memory limit leaves CpuPerTask unset",
+			fields: fields{
+				Reader: func() client.Reader {
+					scheme := runtime.NewScheme()
+					utilruntime.Must(kubescheme.AddToScheme(scheme))
+					utilruntime.Must(batchv1.AddToScheme(scheme))
+					job := newJob("foo")
+					delete(job.Spec.Template.Spec.Resources.Limits, corev1.ResourceCPU)
+					return fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+						job,
+						newJobPod("foo", "foo"),
+					).Build()
+				}(),
+				ctx: context.Background(),
+			},
+			args: args{
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: metav1.NamespaceDefault,
+						Labels:    map[string]string{batchv1.JobNameLabel: "foo"},
+					},
+				},
+				rootPOM: &metav1.PartialObjectMetadata{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: metav1.NamespaceDefault,
+					},
+				},
+			},
+			want: &SlurmJobIR{
+				Components: []SlurmJobComponent{
+					{
+						JobInfo: SlurmJobIRJobInfo{
+							MinNodes:   ptr.To(int32(1)),
+							MemPerNode: ptr.To(int64(1)),
+							// CpuPerTask intentionally unset: let the partition default apply.
+						},
+						Pods: corev1.PodList{
+							Items: []corev1.Pod{{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      "foo",
+									Namespace: metav1.NamespaceDefault,
+									Labels:    map[string]string{batchv1.JobNameLabel: "foo"},
+								},
+							}},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
