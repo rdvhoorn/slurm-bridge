@@ -60,6 +60,9 @@ type SlurmControlInterface interface {
 	NodeNeedsRecreate(ctx context.Context, node *corev1.Node, nodeInfo *nodeinfo.NodeInfo, draInventory []dra.GRESInventory) (bool, error)
 	// RemoveNode removes a Kubernetes node from Slurm.
 	RemoveNode(ctx context.Context, node *corev1.Node) error
+	// GetNodeSchedulableResources returns the CPUs and memory (MiB) Slurm can
+	// allocate to jobs on the node, excluding specialized CPUs and memory.
+	GetNodeSchedulableResources(ctx context.Context, node *corev1.Node) (cpus int32, memoryMB int64, err error)
 }
 
 // RealPodControl is the default implementation of SlurmControlInterface.
@@ -771,6 +774,19 @@ func (r *realSlurmControl) RemoveNode(ctx context.Context, node *corev1.Node) er
 	}
 
 	return nil
+}
+
+// GetNodeSchedulableResources implements SlurmControlInterface.
+func (r *realSlurmControl) GetNodeSchedulableResources(ctx context.Context, node *corev1.Node) (int32, int64, error) {
+	key := slurmobject.ObjectKey(nodeutils.GetSlurmNodeName(node))
+	slurmNode := &slurmtypes.V0044Node{}
+	if err := r.Get(ctx, key, slurmNode); err != nil {
+		return 0, 0, err
+	}
+	// EffectiveCpus (CPUEfctv) already excludes CpuSpecList and CoreSpecCount.
+	cpus := ptr.Deref(slurmNode.EffectiveCpus, ptr.Deref(slurmNode.Cpus, 0))
+	memoryMB := ptr.Deref(slurmNode.RealMemory, 0) - ptr.Deref(slurmNode.SpecializedMemory, 0)
+	return cpus, memoryMB, nil
 }
 
 // validatePartitionExists checks if a Slurm partition exists using the GetPartitionInfo API.

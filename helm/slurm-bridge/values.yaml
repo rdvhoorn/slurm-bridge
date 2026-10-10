@@ -79,6 +79,24 @@ schedulerConfig:
   # -- (integer) Set the scheduler plugin's own Kubernetes client Burst.
   # Defaults to kube-scheduler's own client Burst (100) when unset.
   clientBurst: null
+  # -- Set how bridge jobs share hybrid nodes with native Slurm jobs. Empty
+  # keeps time-only sharing. `coResident` lets pods and native jobs share a
+  # node core by core and requires `mcsLabel: ""`. `exclusive: "true"`
+  # still takes a whole node.
+  nodeSharing: ""
+  # -- Require every co-resident pod container to request a core-bitmap CPU
+  # DeviceClass, such as `dra.cpu`, instead of setting a CPU limit. This pins
+  # pods to the cores Slurm allocated, keeping them off native jobs' cores.
+  # Requires `nodeSharing: coResident`.
+  requireCPUDevice: false
+  # -- (string) Set the kind of Slurm job submitted for each pod: `external`
+  # (the default when unset) or `batch`. Batch placeholders need a Slurm node
+  # epilog that holds the node until the pod has stopped.
+  # Ref: https://github.com/SlinkyProject/slurm-bridge/blob/main/docs/config.md#batch-placeholders
+  placeholder: null
+  # -- (integer) Set the largest pod `terminationGracePeriodSeconds` admission
+  # accepts with batch placeholders. Defaults to 300 when unset.
+  maxTerminationGracePeriodSeconds: null
 
 # Configuration settings for the admission controller.
 admission:

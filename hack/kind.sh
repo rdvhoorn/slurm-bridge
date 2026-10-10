@@ -12,6 +12,9 @@ SLURM_BRIDGE_TMP="$(mktemp -d)"
 trap 'rm -rf "$SLURM_BRIDGE_TMP"' EXIT
 SLURM_NODE_MODE_EXTERNAL="external"
 SLURM_NODE_MODE_HYBRID="hybrid"
+SLURM_NODE_SHARING_CORESIDENT="coResident"
+SLURM_PLACEHOLDER_EXTERNAL="external"
+SLURM_PLACEHOLDER_BATCH="batch"
 DRANET_INTERFACE_NAME="dranet0"
 LOCAL_PATH_PROVISIONER_CHART="oci://ghcr.io/rancher/local-path-provisioner/charts/local-path-provisioner"
 LOCAL_PATH_PROVISIONER_VERSION="0.0.34"
@@ -163,6 +166,7 @@ function kind::start() {
 	fi
 	kubectl config use-context kind-"$cluster_name"
 	slurm-stack::check_node_mode "$OPT_SLURM_NODE_MODE"
+	slurm-stack::check_placeholder "$OPT_SLURM_PLACEHOLDER"
 	kind::configure_nodes "$OPT_SLURM_NODE_MODE"
 	if $OPT_DRANET; then
 		kind::configure_dranet_interfaces
@@ -183,6 +187,7 @@ function cluster::use_existing() {
 	fi
 	if $OPT_CORE || $OPT_PREREQS; then
 		slurm-stack::check_node_mode "$OPT_SLURM_NODE_MODE"
+		slurm-stack::check_placeholder "$OPT_SLURM_PLACEHOLDER"
 	fi
 	kubectl cluster-info
 }
@@ -266,6 +271,7 @@ function slurm-stack::check_node_mode() {
 	installed_mode="$(slurm-stack::installed_node_mode)"
 
 	if [ -z "$installed_mode" ] || [ "$installed_mode" = "$mode" ]; then
+		slurm-stack::check_node_sharing "$installed_mode"
 		return 0
 	fi
 	if [ "$installed_mode" = "unknown" ]; then
@@ -275,6 +281,51 @@ function slurm-stack::check_node_mode() {
 	fi
 	echo "[slurm] Recreate the kind cluster before switching slurm node modes." >&2
 	echo "[slurm]   $(basename "$0") --recreate --slurm-node-mode=$mode" >&2
+	exit 1
+}
+
+# Co-resident settings are layered with --reuse-values and are not removed
+# again, so node sharing can't switch in place either. Only co-resident hybrid
+# clusters run without MCS.
+function slurm-stack::check_node_sharing() {
+	local installed_mode="$1"
+	local extra_conf
+	local installed_sharing=""
+
+	if [ "$installed_mode" != "$SLURM_NODE_MODE_HYBRID" ]; then
+		return 0
+	fi
+	extra_conf="$(kubectl get controllers.slinky.slurm.net -n slurm -o jsonpath='{.items[*].spec.extraConf}')"
+	if [[ $extra_conf != *MCSPlugin=* ]]; then
+		installed_sharing="$SLURM_NODE_SHARING_CORESIDENT"
+	fi
+	if [ "$installed_sharing" != "$OPT_SLURM_NODE_SHARING" ]; then
+		echo "[slurm] Existing slurm node sharing is '$installed_sharing', requested '$OPT_SLURM_NODE_SHARING'." >&2
+		echo "[slurm] Recreate the kind cluster before switching slurm node sharing." >&2
+		exit 1
+	fi
+}
+
+# The epilog is only installed for batch placeholders, and switching modes in
+# place would leave Slurm and the bridge disagreeing.
+function slurm-stack::check_placeholder() {
+	local placeholder="$1"
+	local installed="$SLURM_PLACEHOLDER_EXTERNAL"
+	local values
+
+	if ! helm::find slurm; then
+		return 0
+	fi
+	values="$(helm get values slurm --namespace slurm --output yaml)"
+	if grep -q 'bridge-hold\.sh' <<<"$values"; then
+		installed="$SLURM_PLACEHOLDER_BATCH"
+	fi
+	if [ "$installed" = "$placeholder" ]; then
+		return 0
+	fi
+	echo "[slurm] Existing slurm placeholder is $installed, requested $placeholder." >&2
+	echo "[slurm] Recreate the kind cluster before switching placeholders." >&2
+	echo "[slurm]   $(basename "$0") --recreate --slurm-node-mode=$OPT_SLURM_NODE_MODE --slurm-placeholder=$placeholder" >&2
 	exit 1
 }
 
@@ -325,7 +376,8 @@ function slurm-bridge::install() {
 	echo "[slurm-bridge] Running skaffold (build and deploy slurm-bridge)..."
 	(
 		cd "$ROOT_DIR/helm/slurm-bridge"
-		skaffold run
+		# Activates the co-resident Skaffold profile.
+		SLURM_NODE_SHARING="$OPT_SLURM_NODE_SHARING" skaffold run
 	)
 }
 
@@ -564,14 +616,35 @@ function slurm::configure_for_bridge() {
 			--values "$SCRIPT_DIR/slurm-bridge-external.yaml"
 		;;
 	"$SLURM_NODE_MODE_HYBRID")
+		local values_args=(
+			--values "$SCRIPT_DIR/slurm-bridge-common.yaml"
+			--values "$SCRIPT_DIR/slurm-bridge-hybrid.yaml"
+		)
+		if [ "$OPT_SLURM_NODE_SHARING" = "$SLURM_NODE_SHARING_CORESIDENT" ]; then
+			values_args+=(--values "$SCRIPT_DIR/slurm-bridge-hybrid-coresident.yaml")
+		fi
+		if [ "$OPT_SLURM_PLACEHOLDER" = "$SLURM_PLACEHOLDER_BATCH" ]; then
+			# Shorten the epilog's HOLD_MAX so drain-on-timeout tests finish quickly.
+			# It still exceeds the e2e grace-period cap (60s) plus ~30s for the
+			# bridge to notice that a placeholder ended.
+			local epilog="$SLURM_BRIDGE_TMP/epilog-bridge-hold.sh"
+			{
+				head -n 1 "$SCRIPT_DIR/epilog-bridge-hold.sh"
+				echo 'export HOLD_MAX=120'
+				tail -n +2 "$SCRIPT_DIR/epilog-bridge-hold.sh"
+			} >"$epilog"
+			values_args+=(
+				--values "$SCRIPT_DIR/slurm-bridge-hybrid-batch.yaml"
+				--set-file "epilogScripts.bridge-hold\.sh=$epilog"
+			)
+		fi
 		# Apply controller configuration before creating the NodeSet. Otherwise,
 		# NodeSet reconciliation can back off while slurmctld is restarting.
 		helm upgrade "$chartName" "$chart" \
 			--namespace slurm --create-namespace \
 			--reuse-values \
 			--wait \
-			--values "$SCRIPT_DIR/slurm-bridge-common.yaml" \
-			--values "$SCRIPT_DIR/slurm-bridge-hybrid.yaml" \
+			"${values_args[@]}" \
 			--set nodesets.slurm-bridge.enabled=false
 		helm upgrade "$chartName" "$chart" \
 			--namespace slurm --create-namespace \
@@ -730,7 +803,8 @@ $(basename "$0") - Manage a kind cluster for a slurm-bridge slurm-bridge-demo
 	        [--core|--prereqs][--extras][--all] [--registry=REPO]
 	        [--dra-example-driver] [--dra-driver-cpu]
 	        [--dra-driver-nvidia-gpu] [--dranet] [--kwok] [--metrics]
-	        [--slurm-node-mode=MODE]
+	        [--slurm-node-mode=MODE] [--slurm-node-sharing=SHARING]
+	        [--slurm-placeholder=PLACEHOLDER]
 	        [--slurm-operator-repo=URL] [--slurm-operator-ref=REF]
 	        [--print-image] [-h|--help] [--debug] [KIND_CLUSTER_NAME]
 
@@ -762,6 +836,13 @@ HELM OPTIONS:
 SLURM OPTIONS:
 	--slurm-node-mode=MODE
 	                    Configure Slurm nodes as external or hybrid. Default: $OPT_SLURM_NODE_MODE.
+	--slurm-node-sharing=SHARING
+	                    Set to $SLURM_NODE_SHARING_CORESIDENT to share hybrid nodes core by core
+	                    between pods and native Slurm jobs. Default: time-only sharing.
+	--slurm-placeholder=PLACEHOLDER
+	                    Submit bridge placeholders as external or batch jobs. Batch
+	                    requires hybrid nodes and installs the hold epilog.
+	                    Default: $OPT_SLURM_PLACEHOLDER.
 	--slurm-operator-repo=URL
 	                    Clone slurm-operator from URL. Default: $OPT_SLURM_OPERATOR_REPO.
 	                    Can also be set with SLURM_OPERATOR_REPO.
@@ -785,6 +866,16 @@ function main::validate_options() {
 		echo "--core and --prereqs cannot be used together." >&2
 		exit 1
 	fi
+	if [ -n "$OPT_SLURM_NODE_SHARING" ] && [ "$OPT_SLURM_NODE_MODE" != "$SLURM_NODE_MODE_HYBRID" ]; then
+		echo "--slurm-node-sharing requires --slurm-node-mode=$SLURM_NODE_MODE_HYBRID." >&2
+		exit 1
+	fi
+	if [ "$OPT_SLURM_PLACEHOLDER" = "$SLURM_PLACEHOLDER_BATCH" ] && [ "$OPT_SLURM_NODE_MODE" != "$SLURM_NODE_MODE_HYBRID" ]; then
+		echo "--slurm-placeholder=$SLURM_PLACEHOLDER_BATCH requires --slurm-node-mode=$SLURM_NODE_MODE_HYBRID." >&2
+		exit 1
+	fi
+	# The slurm-bridge skaffold profile for batch placeholders reads this.
+	export SLURM_PLACEHOLDER="$OPT_SLURM_PLACEHOLDER"
 }
 
 function main() {
@@ -868,6 +959,8 @@ OPT_METRICS=false
 OPT_SLURM_OPERATOR_REPO="${SLURM_OPERATOR_REPO:-https://github.com/SlinkyProject/slurm-operator.git}"
 OPT_SLURM_OPERATOR_REF="${SLURM_OPERATOR_REF:-main}"
 OPT_SLURM_NODE_MODE="$SLURM_NODE_MODE_EXTERNAL"
+OPT_SLURM_NODE_SHARING=""
+OPT_SLURM_PLACEHOLDER="$SLURM_PLACEHOLDER_EXTERNAL"
 
 case "$MOCK_NVML" in
 true | false) ;;
@@ -878,7 +971,7 @@ true | false) ;;
 esac
 
 SHORT="+h"
-LONG="all,recreate,config:,print-image,delete,debug,existing-cluster,registry:,core,prereqs,extras,dra-driver-cpu,dra-example-driver,dra-driver-nvidia-gpu,dranet,kwok,metrics,slurm-operator-repo:,slurm-operator-ref:,slurm-node-mode:,help"
+LONG="all,recreate,config:,print-image,delete,debug,existing-cluster,registry:,core,prereqs,extras,dra-driver-cpu,dra-example-driver,dra-driver-nvidia-gpu,dranet,kwok,metrics,slurm-operator-repo:,slurm-operator-ref:,slurm-node-mode:,slurm-node-sharing:,slurm-placeholder:,help"
 OPTS="$(getopt -a --options "$SHORT" --longoptions "$LONG" -- "$@")"
 eval set -- "${OPTS}"
 while :; do
@@ -930,6 +1023,28 @@ while :; do
 		"$SLURM_NODE_MODE_EXTERNAL" | "$SLURM_NODE_MODE_HYBRID") ;;
 		*)
 			echo "--slurm-node-mode must be one of: $SLURM_NODE_MODE_EXTERNAL, $SLURM_NODE_MODE_HYBRID" >&2
+			exit 1
+			;;
+		esac
+		shift 2
+		;;
+	--slurm-node-sharing)
+		OPT_SLURM_NODE_SHARING="$2"
+		case "$OPT_SLURM_NODE_SHARING" in
+		"" | "$SLURM_NODE_SHARING_CORESIDENT") ;;
+		*)
+			echo "--slurm-node-sharing must be empty or $SLURM_NODE_SHARING_CORESIDENT" >&2
+			exit 1
+			;;
+		esac
+		shift 2
+		;;
+	--slurm-placeholder)
+		OPT_SLURM_PLACEHOLDER="$2"
+		case "$OPT_SLURM_PLACEHOLDER" in
+		"$SLURM_PLACEHOLDER_EXTERNAL" | "$SLURM_PLACEHOLDER_BATCH") ;;
+		*)
+			echo "--slurm-placeholder must be one of: $SLURM_PLACEHOLDER_EXTERNAL, $SLURM_PLACEHOLDER_BATCH" >&2
 			exit 1
 			;;
 		esac

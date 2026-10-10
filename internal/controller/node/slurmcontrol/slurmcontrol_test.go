@@ -1153,6 +1153,62 @@ func Test_realSlurmControl_RemoveNode(t *testing.T) {
 	}
 }
 
+func Test_realSlurmControl_GetNodeSchedulableResources(t *testing.T) {
+	ctx := context.Background()
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-0"}}
+	tests := []struct {
+		name         string
+		slurmNode    api.V0044Node
+		wantCPUs     int32
+		wantMemoryMB int64
+		wantErr      bool
+	}{
+		{
+			name: "effective CPUs exclude specialized CPUs",
+			slurmNode: api.V0044Node{
+				Cpus:              ptr.To(int32(16)),
+				EffectiveCpus:     ptr.To(int32(14)),
+				SpecializedCpus:   ptr.To("0-1"),
+				RealMemory:        ptr.To(int64(64000)),
+				SpecializedMemory: ptr.To(int64(2000)),
+			},
+			wantCPUs:     14,
+			wantMemoryMB: 62000,
+		},
+		{
+			name: "total CPUs without effective CPUs",
+			slurmNode: api.V0044Node{
+				Cpus:       ptr.To(int32(16)),
+				RealMemory: ptr.To(int64(64000)),
+			},
+			wantCPUs:     16,
+			wantMemoryMB: 64000,
+		},
+		{
+			name:    "node not found",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder()
+			if !tt.wantErr {
+				tt.slurmNode.Name = ptr.To(node.Name)
+				builder = builder.WithObjects(&types.V0044Node{V0044Node: tt.slurmNode})
+			}
+			r := &realSlurmControl{Client: builder.Build()}
+			gotCPUs, gotMemoryMB, err := r.GetNodeSchedulableResources(ctx, node)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetNodeSchedulableResources() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if gotCPUs != tt.wantCPUs || gotMemoryMB != tt.wantMemoryMB {
+				t.Errorf("GetNodeSchedulableResources() = (%v, %v), want (%v, %v)", gotCPUs, gotMemoryMB, tt.wantCPUs, tt.wantMemoryMB)
+			}
+		})
+	}
+}
+
 func Test_featuresEqual(t *testing.T) {
 	tests := []struct {
 		name    string

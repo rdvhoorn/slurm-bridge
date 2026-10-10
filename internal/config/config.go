@@ -27,6 +27,23 @@ const (
 	DefaultClientBurst int     = 100
 )
 
+// NodeSharingCoResident lets bridge pods and native Slurm jobs share a node at
+// the same time, each on its own cores and memory.
+const NodeSharingCoResident = "coResident"
+
+// Placeholder selects the kind of Slurm job submitted for a pod. An external
+// placeholder (the default) frees its nodes as soon as Slurm ends it; a batch
+// placeholder runs the node epilog, which can hold the node until the pod is
+// gone.
+const (
+	PlaceholderExternal = "external"
+	PlaceholderBatch    = "batch"
+)
+
+// DefaultMaxTerminationGracePeriodSeconds caps pod grace periods for batch
+// placeholders when maxTerminationGracePeriodSeconds is unset.
+const DefaultMaxTerminationGracePeriodSeconds int64 = 300
+
 type Config struct {
 	SchedulerName            string                `json:"schedulerName" yaml:"schedulerName"`
 	SlurmRestApi             string                `json:"slurmRestApi" yaml:"slurmRestApi"`
@@ -40,6 +57,17 @@ type Config struct {
 	// Zero means unset and defaults to DefaultClientQPS/DefaultClientBurst.
 	ClientQPS   float32 `json:"clientQPS,omitempty" yaml:"clientQPS,omitempty"`
 	ClientBurst int     `json:"clientBurst,omitempty" yaml:"clientBurst,omitempty"`
+	// NodeSharing selects how bridge jobs share nodes with native Slurm jobs.
+	// Empty keeps time-only sharing; see NodeSharingCoResident.
+	NodeSharing string `json:"nodeSharing,omitempty" yaml:"nodeSharing,omitempty"`
+	// RequireCPUDevice requires co-resident pods to request a core-bitmap
+	// DeviceClass instead of setting a CPU limit.
+	RequireCPUDevice bool `json:"requireCPUDevice,omitempty" yaml:"requireCPUDevice,omitempty"`
+	// Placeholder is PlaceholderExternal (empty means the same) or
+	// PlaceholderBatch. MaxTerminationGracePeriodSeconds only applies to batch
+	// placeholders; zero means unset.
+	Placeholder                      string `json:"placeholder,omitempty" yaml:"placeholder,omitempty"`
+	MaxTerminationGracePeriodSeconds int64  `json:"maxTerminationGracePeriodSeconds,omitempty" yaml:"maxTerminationGracePeriodSeconds,omitempty"`
 }
 
 // DeviceProfileConfig is the user-facing YAML representation of a DRA device
@@ -70,7 +98,52 @@ func (c *Config) EffectiveClientQPSBurst() (qps float32, burst int) {
 	return qps, burst
 }
 
+// EffectiveMaxTerminationGracePeriodSeconds returns the largest pod grace
+// period admission accepts, or zero for no limit. Only batch placeholders
+// need one: the node epilog holds the node for a bounded time.
+func (c *Config) EffectiveMaxTerminationGracePeriodSeconds() int64 {
+	if c.Placeholder != PlaceholderBatch {
+		return 0
+	}
+	if c.MaxTerminationGracePeriodSeconds == 0 {
+		return DefaultMaxTerminationGracePeriodSeconds
+	}
+	return c.MaxTerminationGracePeriodSeconds
+}
+
+// Validate checks the settings shared by the scheduler and admission.
+func (c *Config) Validate() error {
+	switch c.NodeSharing {
+	case "", NodeSharingCoResident:
+	default:
+		return fmt.Errorf("unsupported nodeSharing %q", c.NodeSharing)
+	}
+	if c.RequireCPUDevice && c.NodeSharing != NodeSharingCoResident {
+		return fmt.Errorf("requireCPUDevice requires nodeSharing %q", NodeSharingCoResident)
+	}
+	switch c.Placeholder {
+	case "", PlaceholderExternal, PlaceholderBatch:
+	default:
+		return fmt.Errorf("unsupported placeholder %q", c.Placeholder)
+	}
+	if c.MaxTerminationGracePeriodSeconds < 0 {
+		return fmt.Errorf("maxTerminationGracePeriodSeconds must not be negative, got %d", c.MaxTerminationGracePeriodSeconds)
+	}
+	return nil
+}
+
 func (c *Config) ValidateScheduler() error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	// Co-resident jobs must not carry an MCS label: with MCS node filtering
+	// configured in Slurm, it would keep native jobs off the node.
+	if c.NodeSharing == NodeSharingCoResident {
+		if strings.TrimSpace(c.MCSLabel) != "" {
+			return errors.New(`scheduler config mcsLabel must be "" when nodeSharing is coResident`)
+		}
+		return nil
+	}
 	if strings.TrimSpace(c.MCSLabel) == "" {
 		return errors.New("scheduler config mcsLabel must not be empty")
 	}

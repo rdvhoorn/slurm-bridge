@@ -130,6 +130,10 @@ func main() {
 		setupLog.Error(err, "unable to parse config file", "file", flags.configFile)
 		os.Exit(1)
 	}
+	if err := cfg.Validate(); err != nil {
+		setupLog.Error(err, "invalid config file", "file", flags.configFile)
+		os.Exit(1)
+	}
 	draRegistry, err := cfg.DRARegistry()
 	if err != nil {
 		setupLog.Error(err, "unable to configure DRA device profiles")
@@ -149,7 +153,9 @@ func main() {
 	go slurmClient.Start(context.Background())
 
 	nodeEventCh := make(chan event.GenericEvent, 100)
-	if err := node.NewReconciler(mgr.GetClient(), slurmClient, cfg.SchedulerName, nodeEventCh, draRegistry).SetupWithManager(mgr); err != nil {
+	nodeReconciler := node.NewReconciler(mgr.GetClient(), slurmClient, cfg.SchedulerName, nodeEventCh, draRegistry)
+	nodeReconciler.CoResident = cfg.NodeSharing == config.NodeSharingCoResident
+	if err := nodeReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Node")
 		os.Exit(1)
 	}

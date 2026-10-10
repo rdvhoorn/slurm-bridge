@@ -46,6 +46,10 @@ deploy:
           admission.image.tag: '{{.IMAGE_TAG_slinky_slurm_net_slurm_bridge_admission}}'
           controllers.image.repository: '{{.IMAGE_REPO_slinky_slurm_net_slurm_bridge_controllers}}'
           controllers.image.tag: '{{.IMAGE_TAG_slinky_slurm_net_slurm_bridge_controllers}}'
+        # Profiles add individual keys under overrides, so several can be active
+        # at once; a JSON-patch add needs the parent map to exist.
+        overrides:
+          schedulerConfig: {}
         namespace: slurm
         createNamespace: true
 profiles:
@@ -57,6 +61,28 @@ profiles:
         path: /deploy/helm/releases/0/setValues
         value:
           scheduler.featureGates.SlurmBridgeGenericWorkload: false
+  # Co-resident node sharing for hack/kind.sh --slurm-node-sharing=coResident.
+  - name: co-resident
+    activation:
+      - env: 'SLURM_NODE_SHARING=^coResident$'
+    patches:
+      - op: add
+        path: /deploy/helm/releases/0/overrides/schedulerConfig/nodeSharing
+        value: coResident
+      - op: add
+        path: /deploy/helm/releases/0/overrides/schedulerConfig/mcsLabel
+        value: ''
+  - name: batch-placeholder
+    activation:
+      - env: 'SLURM_PLACEHOLDER=^batch$'
+    patches:
+      - op: add
+        path: /deploy/helm/releases/0/overrides/schedulerConfig/placeholder
+        value: batch
+      # Below the HOLD_MAX that hack/kind.sh gives the e2e epilog.
+      - op: add
+        path: /deploy/helm/releases/0/overrides/schedulerConfig/maxTerminationGracePeriodSeconds
+        value: 60
 portForward:
   - resourceType: deployment
     resourceName: slurm-bridge-scheduler

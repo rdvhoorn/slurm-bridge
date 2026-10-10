@@ -551,9 +551,21 @@ func TestPodAdmission_ValidateCreate(t *testing.T) {
 			MatchLabels: map[string]string{"app": "topology-test"},
 		},
 	}
+	limits := func(cpu, memory string) corev1.ResourceRequirements {
+		list := corev1.ResourceList{}
+		if cpu != "" {
+			list[corev1.ResourceCPU] = resource.MustParse(cpu)
+		}
+		if memory != "" {
+			list[corev1.ResourceMemory] = resource.MustParse(memory)
+		}
+		return corev1.ResourceRequirements{Limits: list}
+	}
 	type fields struct {
-		SchedulerName     string
-		ManagedNamespaces []string
+		SchedulerName                    string
+		ManagedNamespaces                []string
+		CoResident                       bool
+		MaxTerminationGracePeriodSeconds int64
 	}
 	type args struct {
 		ctx context.Context
@@ -983,6 +995,88 @@ func TestPodAdmission_ValidateCreate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "PodWithGracePeriodWithinMax",
+			fields: fields{
+				ManagedNamespaces:                []string{namespace},
+				MaxTerminationGracePeriodSeconds: 300,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec:       corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(300))},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "PodWithGracePeriodAboveMax",
+			fields: fields{
+				ManagedNamespaces:                []string{namespace},
+				MaxTerminationGracePeriodSeconds: 300,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec:       corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(301))},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "spec.terminationGracePeriodSeconds must not exceed 300",
+		},
+		{
+			name: "PodWithDefaultGracePeriodAboveMax",
+			fields: fields{
+				ManagedNamespaces:                []string{namespace},
+				MaxTerminationGracePeriodSeconds: 10,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "spec.terminationGracePeriodSeconds must not exceed 10",
+		},
+		{
+			name: "PodWithGracePeriodWithoutMax",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec:       corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(3600))},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "PodWithGracePeriodAboveMaxInUnmanagedNamespace",
+			fields: fields{
+				SchedulerName:                    SchedulerName,
+				ManagedNamespaces:                []string{namespace},
+				MaxTerminationGracePeriodSeconds: 300,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "unmanaged-ns"},
+					Spec: corev1.PodSpec{
+						SchedulerName:                 "other-scheduler",
+						TerminationGracePeriodSeconds: ptr.To(int64(3600)),
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
 			name: "PodWithDifferentSchedulerInUnmanagedNamespace",
 			fields: fields{
 				SchedulerName:     SchedulerName,
@@ -1005,13 +1099,276 @@ func TestPodAdmission_ValidateCreate(t *testing.T) {
 			want:    nil,
 			wantErr: false,
 		},
+		{
+			name: "PodWithoutLimitsWithoutCoResident",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "work"}},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "CoResidentPodWithoutLimits",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "work"}},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "requires a memory limit",
+		},
+		{
+			name: "CoResidentPodWithoutCPULimit",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "work", Resources: limits("", "1Gi")}},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "requires a CPU limit",
+		},
+		{
+			name: "CoResidentPodWithZeroMemoryLimit",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "work", Resources: limits("1", "0")}},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "requires a memory limit",
+		},
+		{
+			name: "CoResidentPodWithContainerLimits",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "work", Resources: limits("1", "1Gi")},
+							{Name: "helper", Resources: limits("100m", "64Mi")},
+						},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "CoResidentPodWithPodLevelLimits",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						Resources:  ptr.To(limits("2", "2Gi")),
+						Containers: []corev1.Container{{Name: "work"}, {Name: "helper"}},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "CoResidentPodWithUnlimitedSidecar",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						InitContainers: []corev1.Container{{
+							Name:          "sidecar",
+							RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+							Resources:     limits("100m", ""),
+						}},
+						Containers: []corev1.Container{{Name: "work", Resources: limits("1", "1Gi")}},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "requires a memory limit",
+		},
+		{
+			name: "CoResidentPodWithUnlimitedInitContainer",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						InitContainers: []corev1.Container{{Name: "init", Resources: limits("", "1Gi")}},
+						Containers:     []corev1.Container{{Name: "work", Resources: limits("1", "1Gi")}},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "requires a CPU limit",
+		},
+		{
+			name: "CoResidentPodWithLimitedInitAndSidecarContainers",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
+					Spec: corev1.PodSpec{
+						InitContainers: []corev1.Container{
+							{Name: "init", Resources: limits("1", "1Gi")},
+							{
+								Name:          "sidecar",
+								RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+								Resources:     limits("100m", "64Mi"),
+							},
+						},
+						Containers: []corev1.Container{{Name: "work", Resources: limits("1", "1Gi")}},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "CoResidentPodWithCpuPerTaskAnnotation",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Annotations: map[string]string{wellknown.AnnotationCpuPerTask: "2"},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "work", Resources: limits("1", "1Gi")}},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: wellknown.AnnotationCpuPerTask,
+		},
+		{
+			name: "CoResidentPodWithMemPerNodeAnnotation",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Annotations: map[string]string{wellknown.AnnotationMemPerNode: "512Mi"},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "work", Resources: limits("1", "1Gi")}},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: wellknown.AnnotationMemPerNode,
+		},
+		{
+			name: "PodWithMemPerNodeAnnotationWithoutCoResident",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Annotations: map[string]string{wellknown.AnnotationMemPerNode: "512Mi"},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "work"}},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "CoResidentPodWithDifferentSchedulerInUnmanagedNamespace",
+			fields: fields{
+				SchedulerName:     SchedulerName,
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: context.TODO(),
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "unmanaged-ns"},
+					Spec: corev1.PodSpec{
+						SchedulerName: "other-scheduler",
+						Containers:    []corev1.Container{{Name: "work"}},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &PodAdmission{
-				Client:            fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
-				SchedulerName:     tt.fields.SchedulerName,
-				ManagedNamespaces: tt.fields.ManagedNamespaces,
+				Client:                           fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+				SchedulerName:                    tt.fields.SchedulerName,
+				ManagedNamespaces:                tt.fields.ManagedNamespaces,
+				CoResident:                       tt.fields.CoResident,
+				MaxTerminationGracePeriodSeconds: tt.fields.MaxTerminationGracePeriodSeconds,
 			}
 			got, err := r.ValidateCreate(tt.args.ctx, tt.args.pod)
 			if (err != nil) != tt.wantErr {
@@ -1214,6 +1571,138 @@ func TestPodAdmission_ValidateCreate_DRA(t *testing.T) {
 		}
 	})
 
+	t.Run("co-resident core-bitmap CPU with memory limit", func(t *testing.T) {
+		cpuClass := &resourcev1.DeviceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeinfo.DraDriverCpu},
+			Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{
+				CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "dra.cpu"`},
+			}}},
+		}
+		pod := newPod()
+		pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceName(resourcev1.ResourceDeviceClassPrefix + nodeinfo.DraDriverCpu): resource.MustParse("1"),
+			},
+			Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+		}
+		admission := newAdmission(cpuClass)
+		admission.CoResident = true
+		warnings, err := admission.ValidateCreate(context.Background(), pod)
+		if err != nil {
+			t.Fatalf("PodAdmission.ValidateCreate() error = %v", err)
+		}
+		if len(warnings) != 0 {
+			t.Fatalf("PodAdmission.ValidateCreate() warnings = %v, want none", warnings)
+		}
+	})
+
+	// Native CPU and core-bitmap CPU can't be mixed in one pod, so with a
+	// core-bitmap class every container must request it to be CPU-bounded.
+	t.Run("co-resident core-bitmap CPU does not bound other containers", func(t *testing.T) {
+		cpuClass := &resourcev1.DeviceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeinfo.DraDriverCpu},
+			Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{
+				CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "dra.cpu"`},
+			}}},
+		}
+		cpuResource := corev1.ResourceName(resourcev1.ResourceDeviceClassPrefix + nodeinfo.DraDriverCpu)
+		for _, tt := range []struct {
+			name            string
+			helperCPU       bool
+			wantErrContains string
+		}{
+			{name: "helper without core-bitmap request", wantErrContains: `requires a CPU limit on the pod or on container "helper"`},
+			{name: "helper with core-bitmap request", helperCPU: true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				pod := newPod()
+				pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{cpuResource: resource.MustParse("1")},
+					Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+				}
+				helper := corev1.Container{Name: "helper", Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+				}}
+				if tt.helperCPU {
+					helper.Resources.Requests = corev1.ResourceList{cpuResource: resource.MustParse("1")}
+				}
+				pod.Spec.Containers = append(pod.Spec.Containers, helper)
+				admission := newAdmission(cpuClass)
+				admission.CoResident = true
+				_, err := admission.ValidateCreate(context.Background(), pod)
+				if tt.wantErrContains == "" && err != nil {
+					t.Fatalf("PodAdmission.ValidateCreate() error = %v", err)
+				}
+				if tt.wantErrContains != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErrContains)) {
+					t.Fatalf("PodAdmission.ValidateCreate() error = %v, want error containing %q", err, tt.wantErrContains)
+				}
+			})
+		}
+	})
+
+	t.Run("co-resident requiring CPU device", func(t *testing.T) {
+		cpuClass := &resourcev1.DeviceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeinfo.DraDriverCpu},
+			Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{
+				CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "dra.cpu"`},
+			}}},
+		}
+		cpuResource := corev1.ResourceName(resourcev1.ResourceDeviceClassPrefix + nodeinfo.DraDriverCpu)
+		for _, tt := range []struct {
+			name            string
+			resources       corev1.ResourceRequirements
+			wantErrContains string
+		}{
+			{
+				name: "core-bitmap request",
+				resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{cpuResource: resource.MustParse("1")},
+					Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+				},
+			},
+			{
+				name: "CPU limit",
+				resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				}},
+				wantErrContains: `requireCPUDevice requires container "work" to request a core-bitmap DeviceClass`,
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				pod := newPod()
+				pod.Spec.Containers[0].Resources = tt.resources
+				admission := newAdmission(cpuClass)
+				admission.CoResident = true
+				admission.RequireCPUDevice = true
+				_, err := admission.ValidateCreate(context.Background(), pod)
+				if tt.wantErrContains == "" && err != nil {
+					t.Fatalf("PodAdmission.ValidateCreate() error = %v", err)
+				}
+				if tt.wantErrContains != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErrContains)) {
+					t.Fatalf("PodAdmission.ValidateCreate() error = %v, want error containing %q", err, tt.wantErrContains)
+				}
+			})
+		}
+	})
+
+	t.Run("co-resident indexed-GRES device without CPU limit", func(t *testing.T) {
+		pod := newPod()
+		pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{deviceResource: resource.MustParse("1")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+		}
+		admission := newAdmission(validClass())
+		admission.CoResident = true
+		warnings, err := admission.ValidateCreate(context.Background(), pod)
+		if err == nil || !strings.Contains(err.Error(), "requires a CPU limit") {
+			t.Fatalf("PodAdmission.ValidateCreate() error = %v, want CPU limit error", err)
+		}
+		if len(warnings) != 0 {
+			t.Fatalf("PodAdmission.ValidateCreate() warnings = %v, want none", warnings)
+		}
+	})
+
 	t.Run("limit in init container", func(t *testing.T) {
 		pod := newPod()
 		pod.Spec.InitContainers = []corev1.Container{{
@@ -1291,6 +1780,7 @@ func TestPodAdmission_ValidateUpdate(t *testing.T) {
 	type fields struct {
 		SchedulerName     string
 		ManagedNamespaces []string
+		CoResident        bool
 	}
 	type args struct {
 		ctx    context.Context
@@ -1523,12 +2013,99 @@ func TestPodAdmission_ValidateUpdate(t *testing.T) {
 			want:    nil,
 			wantErr: false,
 		},
+		{
+			name: "CoResidentPodAddsMemPerNodeAnnotation",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx:    contextWithAdmissionSubresource(""),
+				oldPod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace}},
+				newPod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Annotations: map[string]string{wellknown.AnnotationMemPerNode: "512Mi"},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "CoResidentPodKeepsMemPerNodeAnnotation",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: contextWithAdmissionSubresource(""),
+				oldPod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Annotations: map[string]string{wellknown.AnnotationMemPerNode: "512Mi"},
+					},
+				},
+				newPod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Labels:      map[string]string{wellknown.LabelExternalJobId: "1"},
+						Annotations: map[string]string{wellknown.AnnotationMemPerNode: "512Mi"},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "CoResidentPodChangesCpuPerTaskAnnotation",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+				CoResident:        true,
+			},
+			args: args{
+				ctx: contextWithAdmissionSubresource(""),
+				oldPod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Annotations: map[string]string{wellknown.AnnotationCpuPerTask: "2"},
+					},
+				},
+				newPod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Annotations: map[string]string{wellknown.AnnotationCpuPerTask: "4"},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "PodAddsMemPerNodeAnnotationWithoutCoResident",
+			fields: fields{
+				ManagedNamespaces: []string{namespace},
+			},
+			args: args{
+				ctx:    contextWithAdmissionSubresource(""),
+				oldPod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace}},
+				newPod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:   namespace,
+						Annotations: map[string]string{wellknown.AnnotationMemPerNode: "512Mi"},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &PodAdmission{
 				SchedulerName:     tt.fields.SchedulerName,
 				ManagedNamespaces: tt.fields.ManagedNamespaces,
+				CoResident:        tt.fields.CoResident,
 			}
 			got, err := r.ValidateUpdate(tt.args.ctx, tt.args.oldPod, tt.args.newPod)
 			if (err != nil) != tt.wantErr {

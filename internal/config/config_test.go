@@ -100,6 +100,29 @@ clientBurst: 150
 			wantErr: false,
 		},
 		{
+			name: "Test nodeSharing",
+			args: args{
+				in: []byte(`nodeSharing: coResident`),
+			},
+			want: &Config{
+				NodeSharing: NodeSharingCoResident,
+			},
+			wantErr: false,
+		},
+		{
+			name: "Test placeholder and maxTerminationGracePeriodSeconds",
+			args: args{
+				in: []byte(`placeholder: batch
+maxTerminationGracePeriodSeconds: 120
+`),
+			},
+			want: &Config{
+				Placeholder:                      PlaceholderBatch,
+				MaxTerminationGracePeriodSeconds: 120,
+			},
+			wantErr: false,
+		},
+		{
 			name: "Test managedNamespaceSelector",
 			args: args{
 				in: []byte(`
@@ -335,6 +358,43 @@ func TestConfig_ValidateScheduler(t *testing.T) {
 			config:  Config{MCSLabel: "  "},
 			wantErr: true,
 		},
+		{
+			name:   "co-resident without MCS label",
+			config: Config{NodeSharing: NodeSharingCoResident},
+		},
+		{
+			name:    "co-resident with MCS label",
+			config:  Config{NodeSharing: NodeSharingCoResident, MCSLabel: "kubernetes"},
+			wantErr: true,
+		},
+		{
+			name:   "co-resident with whitespace MCS label",
+			config: Config{NodeSharing: NodeSharingCoResident, MCSLabel: "  "},
+		},
+		{
+			name:    "unknown node sharing",
+			config:  Config{NodeSharing: "oversubscribe", MCSLabel: "kubernetes"},
+			wantErr: true,
+		},
+		{
+			name:    "node sharing is case-sensitive",
+			config:  Config{NodeSharing: "coresident"},
+			wantErr: true,
+		},
+		{
+			name:   "co-resident requiring CPU device",
+			config: Config{NodeSharing: NodeSharingCoResident, RequireCPUDevice: true},
+		},
+		{
+			name:    "requiring CPU device without co-resident",
+			config:  Config{MCSLabel: "kubernetes", RequireCPUDevice: true},
+			wantErr: true,
+		},
+		{
+			name:    "unsupported placeholder",
+			config:  Config{MCSLabel: "kubernetes", Placeholder: "interactive"},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -370,6 +430,75 @@ func TestConfig_EffectiveClientQPSBurst(t *testing.T) {
 			qps, burst := tt.config.EffectiveClientQPSBurst()
 			if qps != tt.wantQPS || burst != tt.wantBurst {
 				t.Errorf("EffectiveClientQPSBurst() = (%v, %v), want (%v, %v)", qps, burst, tt.wantQPS, tt.wantBurst)
+			}
+		})
+	}
+}
+
+func TestConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  Config
+		wantErr bool
+	}{
+		{
+			name:   "unset",
+			config: Config{},
+		},
+		{
+			name:   "external placeholder",
+			config: Config{Placeholder: PlaceholderExternal},
+		},
+		{
+			name:   "batch placeholder with max grace period",
+			config: Config{Placeholder: PlaceholderBatch, MaxTerminationGracePeriodSeconds: 60},
+		},
+		{
+			name:    "unsupported placeholder",
+			config:  Config{Placeholder: "Batch"},
+			wantErr: true,
+		},
+		{
+			name:    "negative max grace period",
+			config:  Config{Placeholder: PlaceholderBatch, MaxTerminationGracePeriodSeconds: -1},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.config.Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Config.Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfig_EffectiveMaxTerminationGracePeriodSeconds(t *testing.T) {
+	tests := []struct {
+		name   string
+		config Config
+		want   int64
+	}{
+		{
+			name:   "external placeholder has no limit",
+			config: Config{MaxTerminationGracePeriodSeconds: 60},
+			want:   0,
+		},
+		{
+			name:   "batch placeholder unset falls back to default",
+			config: Config{Placeholder: PlaceholderBatch},
+			want:   DefaultMaxTerminationGracePeriodSeconds,
+		},
+		{
+			name:   "batch placeholder configured value is used as-is",
+			config: Config{Placeholder: PlaceholderBatch, MaxTerminationGracePeriodSeconds: 60},
+			want:   60,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.config.EffectiveMaxTerminationGracePeriodSeconds(); got != tt.want {
+				t.Errorf("EffectiveMaxTerminationGracePeriodSeconds() = %v, want %v", got, tt.want)
 			}
 		})
 	}

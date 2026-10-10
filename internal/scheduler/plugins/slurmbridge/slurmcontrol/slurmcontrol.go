@@ -116,8 +116,10 @@ type SlurmControlInterface interface {
 // RealPodControl is the default implementation of SlurmControlInterface.
 type realSlurmControl struct {
 	client.Client
-	mcsLabel  string
-	partition string
+	mcsLabel         string
+	partition        string
+	coResident       bool
+	batchPlaceholder bool
 }
 
 type NodeResources struct {
@@ -138,13 +140,19 @@ type GresLayout struct {
 	Type  string
 }
 
-func sharedFromExclusiveAnnotation(slurmJobComponent *slurmjobir.SlurmJobComponent) *[]api.V0044JobDescMsgShared {
-	exclusive := true
+// sharedFromExclusiveAnnotation returns the job's sharing mode. Co-resident
+// jobs default to non-exclusive and omit shared, so a partition with
+// OverSubscribe=NO packs them beside native jobs on separate cores.
+func sharedFromExclusiveAnnotation(slurmJobComponent *slurmjobir.SlurmJobComponent, coResident bool) *[]api.V0044JobDescMsgShared {
+	exclusive := !coResident
 	if slurmJobComponent != nil && slurmJobComponent.JobInfo.Exclusive != nil {
 		exclusive = *slurmJobComponent.JobInfo.Exclusive
 	}
 	if exclusive {
 		return &[]api.V0044JobDescMsgShared{api.V0044JobDescMsgSharedNone}
+	}
+	if coResident {
+		return nil
 	}
 	return &[]api.V0044JobDescMsgShared{api.V0044JobDescMsgSharedMcs}
 }
@@ -459,7 +467,6 @@ func (r *realSlurmControl) buildJobDesc(jobComponent slurmjobir.SlurmJobComponen
 		GroupId:       jobComponent.JobInfo.GroupId,
 		Licenses:      jobComponent.JobInfo.Licenses,
 		MaximumNodes:  jobComponent.JobInfo.MaxNodes,
-		McsLabel:      ptr.To(r.mcsLabel),
 		MemoryPerNode: &api.V0044Uint64NoValStruct{Set: ptr.To(false)},
 		MinimumNodes:  jobComponent.JobInfo.MinNodes,
 		Name:          jobComponent.JobInfo.JobName,
@@ -478,7 +485,26 @@ func (r *realSlurmControl) buildJobDesc(jobComponent slurmjobir.SlurmJobComponen
 	// oversubscribe and clears whole_node, including the MCS isolation flag.
 	// Omitting shared preserves the existing allocation's sharing mode.
 	if !update {
-		jobDesc.Shared = sharedFromExclusiveAnnotation(&jobComponent)
+		jobDesc.Shared = sharedFromExclusiveAnnotation(&jobComponent, r.coResident)
+	}
+	if r.mcsLabel != "" {
+		jobDesc.McsLabel = ptr.To(r.mcsLabel)
+	}
+
+	// A batch placeholder is launched by slurmd, so when Slurm ends it the
+	// nodes go COMPLETING and the node epilog can hold them until the pod is
+	// gone. An external job frees its nodes at once. Send the launch settings
+	// only at submission: they never change, and leaving them out keeps a
+	// pending-job update to the scheduling fields it is meant to change.
+	if r.batchPlaceholder {
+		jobDesc.Flags = nil
+		if !update {
+			// slurmctld rejects a batch job with an empty environment.
+			jobDesc.Environment = &api.V0044StringArray{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+			jobDesc.Requeue = ptr.To(false)
+			jobDesc.Script = ptr.To("#!/bin/sh\nexec sleep infinity\n")
+			jobDesc.StandardOutput = ptr.To("/dev/null")
+		}
 	}
 
 	if len(excludedNodes) == 0 && !update {
@@ -577,10 +603,48 @@ func (r *realSlurmControl) getNodeExtra(ctx context.Context, nodeName string) (s
 
 var _ SlurmControlInterface = &realSlurmControl{}
 
-func NewControl(client client.Client, mcsLabel string, partition string) SlurmControlInterface {
-	return &realSlurmControl{
+// PartitionOversubscribes reports whether partition may place jobs on cores
+// already allocated to other jobs. Co-resident jobs omit shared, so they rely on
+// the partition being OverSubscribe=NO or EXCLUSIVE.
+func PartitionOversubscribes(ctx context.Context, c client.Client, partition string) (bool, error) {
+	info := &slurmtypes.V0044PartitionInfo{}
+	if err := c.Get(ctx, object.ObjectKey(partition), info); err != nil {
+		return false, err
+	}
+	if info.Maximums == nil || info.Maximums.Oversubscribe == nil {
+		return false, nil
+	}
+	oversubscribe := info.Maximums.Oversubscribe
+	return ptr.Deref(oversubscribe.Jobs, 0) > 1 || len(ptr.Deref(oversubscribe.Flags, nil)) > 0, nil
+}
+
+// Option configures the SlurmControlInterface returned by NewControl.
+type Option func(*realSlurmControl)
+
+// WithCoResident submits jobs for co-resident node sharing: non-exclusive by
+// default, without a shared value.
+func WithCoResident() Option {
+	return func(r *realSlurmControl) {
+		r.coResident = true
+	}
+}
+
+// WithBatchPlaceholder submits placeholders as batch jobs instead of external
+// jobs, so the node epilog can hold their nodes until the pod is gone.
+func WithBatchPlaceholder() Option {
+	return func(r *realSlurmControl) {
+		r.batchPlaceholder = true
+	}
+}
+
+func NewControl(client client.Client, mcsLabel string, partition string, opts ...Option) SlurmControlInterface {
+	r := &realSlurmControl{
 		Client:    client,
 		mcsLabel:  mcsLabel,
 		partition: partition,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }

@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,6 +36,14 @@ type PodAdmission struct {
 	ManagedNamespaces        []string
 	ManagedNamespaceSelector *metav1.LabelSelector
 	DRARegistry              *dra.Registry
+	// CoResident requires the limits co-resident node sharing relies on.
+	CoResident bool
+	// RequireCPUDevice requires co-resident pods to request a core-bitmap
+	// DeviceClass instead of setting a CPU limit.
+	RequireCPUDevice bool
+	// MaxTerminationGracePeriodSeconds limits pod grace periods; zero means
+	// no limit.
+	MaxTerminationGracePeriodSeconds int64
 }
 
 func (r *PodAdmission) draRegistry() *dra.Registry {
@@ -132,11 +141,24 @@ func (r *PodAdmission) ValidateCreate(ctx context.Context, pod *corev1.Pod) (adm
 	if hasRequiredAffinity(pod) {
 		return nil, fmt.Errorf("spec.affinity's required fields are not supported by the slurm-bridge scheduler, use a Slurm partition or constraint instead")
 	}
+	if limit := r.MaxTerminationGracePeriodSeconds; limit > 0 &&
+		ptr.Deref(pod.Spec.TerminationGracePeriodSeconds, corev1.DefaultTerminationGracePeriodSeconds) > limit {
+		return nil, fmt.Errorf("spec.terminationGracePeriodSeconds must not exceed %d, the node epilog only holds the node for a bounded time while the pod shuts down", limit)
+	}
 	if err := validatePositiveResourceQuantities(pod); err != nil {
 		return nil, err
 	}
-	if err := r.validateDRAResources(ctx, pod); err != nil {
+	coreBitmapCPU, err := r.validateDRAResources(ctx, pod)
+	if err != nil {
 		return nil, err
+	}
+	if r.CoResident {
+		if err := validateCoResidentLimits(pod, coreBitmapCPU, r.RequireCPUDevice); err != nil {
+			return nil, err
+		}
+		if err := validateCoResidentAnnotations(nil, pod); err != nil {
+			return nil, err
+		}
 	}
 	if err := validateAnnotationConflicts(pod); err != nil {
 		return nil, err
@@ -167,8 +189,13 @@ func (r *PodAdmission) ValidateUpdate(ctx context.Context, oldPod *corev1.Pod, n
 	if req.SubResource == "resize" {
 		return nil, fmt.Errorf("can't resize a Slurm Bridge-managed pod")
 	}
-	if err := r.validateDRAResources(ctx, newPod); err != nil {
+	if _, err := r.validateDRAResources(ctx, newPod); err != nil {
 		return nil, err
+	}
+	if r.CoResident {
+		if err := validateCoResidentAnnotations(oldPod, newPod); err != nil {
+			return nil, err
+		}
 	}
 	if err := validateAnnotationConflicts(newPod); err != nil {
 		return nil, err
@@ -275,7 +302,9 @@ func validatePositiveResourceRequirements(resources corev1.ResourceRequirements,
 	return nil
 }
 
-func (r *PodAdmission) validateDRAResources(ctx context.Context, pod *corev1.Pod) error {
+// validateDRAResources returns the pod's core-bitmap DeviceClass resource
+// names.
+func (r *PodAdmission) validateDRAResources(ctx context.Context, pod *corev1.Pod) ([]corev1.ResourceName, error) {
 	classNames := make(map[string]struct{})
 	containers := slices.Clone(pod.Spec.InitContainers)
 	containers = append(containers, pod.Spec.Containers...)
@@ -290,21 +319,78 @@ func (r *PodAdmission) validateDRAResources(ctx context.Context, pod *corev1.Pod
 
 	registry := r.draRegistry()
 	hasNativeCPU := podRequestsNativeCPU(pod)
+	var coreBitmapCPU []corev1.ResourceName
 	for _, className := range slices.Sorted(maps.Keys(classNames)) {
 		deviceClass := &resourcev1.DeviceClass{}
 		if err := r.Get(ctx, client.ObjectKey{Name: className}, deviceClass); err != nil {
-			return fmt.Errorf("get device class %q: %w", className, err)
+			return nil, fmt.Errorf("get device class %q: %w", className, err)
 		}
 		// TODO: Persist the admitted DeviceProfile if DeviceClasses may be repointed
 		// while a workload is scheduling. The current flow assumes DeviceClass
 		// selectors remain stable and re-resolves them during scheduling.
 		profile, err := registry.MatchDeviceClass(deviceClass)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if profile.UsesCoreBitmap() && hasNativeCPU {
-			return fmt.Errorf("can't specify both native %q and core-bitmap DeviceClass %q", corev1.ResourceCPU, className)
+			return nil, fmt.Errorf("can't specify both native %q and core-bitmap DeviceClass %q", corev1.ResourceCPU, className)
 		}
+		if profile.UsesCoreBitmap() {
+			coreBitmapCPU = append(coreBitmapCPU, corev1.ResourceName(resourcev1.ResourceDeviceClassPrefix+className))
+		}
+	}
+	return coreBitmapCPU, nil
+}
+
+// validateCoResidentLimits requires the limits the kernel enforces, so a pod
+// on a co-resident node cannot use more than its Slurm reservation. Each
+// container must be bounded by a pod-level or container limit; a container
+// requesting a core-bitmap DeviceClass is bounded to its allocated CPUs instead.
+// With requireCPUDevice, every container must request a core-bitmap DeviceClass.
+func validateCoResidentLimits(pod *corev1.Pod, coreBitmapCPU []corev1.ResourceName, requireCPUDevice bool) error {
+	podMemory, podCPU := false, false
+	if pod.Spec.Resources != nil {
+		podMemory = hasPositiveLimit(*pod.Spec.Resources, corev1.ResourceMemory)
+		podCPU = hasPositiveLimit(*pod.Spec.Resources, corev1.ResourceCPU)
+	}
+	for _, container := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
+		if !podMemory && !hasPositiveLimit(container.Resources, corev1.ResourceMemory) {
+			return fmt.Errorf("co-resident node sharing requires a memory limit on the pod or on container %q, so the pod can't exceed its Slurm reservation", container.Name)
+		}
+		requestsCoreBitmap := slices.ContainsFunc(coreBitmapCPU, func(name corev1.ResourceName) bool {
+			return resourceIsSet(container.Resources, name)
+		})
+		if requireCPUDevice && !requestsCoreBitmap {
+			return fmt.Errorf("requireCPUDevice requires container %q to request a core-bitmap DeviceClass, which pins it to the cores Slurm allocated and keeps it off native jobs' cores", container.Name)
+		}
+		if !podCPU && !hasPositiveLimit(container.Resources, corev1.ResourceCPU) && !requestsCoreBitmap {
+			return fmt.Errorf("co-resident node sharing requires a CPU limit on the pod or on container %q, or a core-bitmap DeviceClass request in it, so the pod can't exceed its Slurm reservation", container.Name)
+		}
+	}
+	return nil
+}
+
+func hasPositiveLimit(resources corev1.ResourceRequirements, name corev1.ResourceName) bool {
+	limit, ok := resources.Limits[name]
+	return ok && limit.Sign() > 0
+}
+
+// validateCoResidentAnnotations rejects annotations that override the Slurm
+// reservation, which must follow the limits the kernel enforces. On update,
+// only added or changed values are rejected, so a pod admitted before
+// co-resident mode was enabled can still be updated.
+func validateCoResidentAnnotations(oldPod, pod *corev1.Pod) error {
+	for _, key := range []string{wellknown.AnnotationCpuPerTask, wellknown.AnnotationMemPerNode} {
+		value, ok := pod.Annotations[key]
+		if !ok {
+			continue
+		}
+		if oldPod != nil {
+			if oldValue, had := oldPod.Annotations[key]; had && oldValue == value {
+				continue
+			}
+		}
+		return fmt.Errorf("annotation %q is not supported with co-resident node sharing: the Slurm reservation is derived from the pod's limits, which the kernel enforces", key)
 	}
 	return nil
 }

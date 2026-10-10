@@ -14,6 +14,8 @@
     - [Topology](#topology)
     - [Hybrid Workload Isolation](#hybrid-workload-isolation)
       - [Production label authorization](#production-label-authorization)
+    - [Co-resident Nodes](#co-resident-nodes)
+    - [Batch Placeholders](#batch-placeholders)
 
 <!-- mdformat-toc end -->
 
@@ -79,10 +81,11 @@ Hybrid nodes run kubelet and `slurmd` on the same physical host. In this mode,
 slurm-operator manages the Slurm nodes with a `Nodeset`, and bridge jobs run on
 the Slurm nodes registered by those `slurmd` pods.
 
-Hybrid nodes share capacity between workload managers over time. A physical node
-must not run a native Slurm user workload and a Slurm-bridge-managed Kubernetes
-user workload simultaneously. System components such as kubelet, `slurmd`, CNI,
-device plugins, and monitoring DaemonSets are expected exceptions.
+Hybrid nodes share capacity between workload managers over time, unless
+[co-resident mode](#co-resident-nodes) is enabled. A physical node must not run
+a native Slurm user workload and a Slurm-bridge-managed Kubernetes user workload
+simultaneously. System components such as kubelet, `slurmd`, CNI, device
+plugins, and monitoring DaemonSets are expected exceptions.
 
 For example, a DaemonSet-mode `Nodeset` can place one `slurmd` pod on each
 Kubernetes worker node selected for bridge scheduling:
@@ -177,9 +180,10 @@ topology.
 
 ### Hybrid Workload Isolation
 
-Bridge jobs receive exclusive whole-node Slurm allocations by default. Workloads
-requesting `slurmjob.slinky.slurm.net/exclusive: "false"` are always submitted
-with `Shared=mcs` and the configured `schedulerConfig.mcsLabel`. This allows
+Unless [co-resident mode](#co-resident-nodes) is enabled, bridge jobs receive
+exclusive whole-node Slurm allocations by default, and workloads requesting
+`slurmjob.slinky.slurm.net/exclusive: "false"` are always submitted with
+`Shared=mcs` and the configured `schedulerConfig.mcsLabel`. This allows
 bridge-managed Kubernetes workloads in the same MCS category to share a node
 without enabling unprotected sharing with native Slurm jobs.
 
@@ -218,7 +222,167 @@ to keep Kubernetes workloads that bypass slurm-bridge off hybrid nodes.
 Operational or controller-driven cancellation must also keep a node unavailable
 to native Slurm work until its Kubernetes pods have actually stopped.
 
+[Batch placeholders](#batch-placeholders) close this gap when Slurm ends the job
+first.
+
+### Co-resident Nodes
+
+Set `schedulerConfig.nodeSharing: coResident` to let bridge pods and native
+Slurm jobs run on the same hybrid node at the same time, each on its own cores
+and memory. Slurm still decides placement for both. In this mode:
+
+- Bridge jobs are non-exclusive by default and are submitted without a `shared`
+  value, so Slurm packs them beside native jobs one core at a time.
+  `slurmjob.slinky.slurm.net/exclusive: "true"` still requests a whole node.
+- MCS is not used. The scheduler refuses to start unless
+  `schedulerConfig.mcsLabel` is `""`; also remove the MCS settings from
+  `slurm.conf`.
+- The admission webhook requires every container to be bounded by a memory
+  limit, and by a CPU limit or a request for a core-bitmap CPU DeviceClass such
+  as `dra.cpu`. A pod-level limit bounds all containers. The kernel enforces
+  limits, not requests, so without them a pod could use more than Slurm reserved
+  for it. Guaranteed QoS pods meet this requirement.
+- The webhook rejects the `cpu-per-task` and `mem-per-node` annotations, since
+  the Slurm reservation must match the limits. It can't see these annotations on
+  an owning workload object, such as a JobSet, LeaderWorkerSet, or PodGroup,
+  rather than on the pod template; don't use them there in this mode.
+- Every partition that bridge jobs use must be `OverSubscribe=NO` or
+  `OverSubscribe=EXCLUSIVE`. Bridge jobs leave sharing to the partition, so with
+  `YES` or `FORCE` Slurm may run bridge pods and native jobs on the same cores.
+  The scheduler logs a warning at startup if its default partition allows this.
+- With `schedulerConfig.requireCPUDevice: true`, the webhook requires every
+  container to request a core-bitmap CPU DeviceClass; a CPU limit is no longer
+  enough. The DRA CPU driver then pins each pod to the cores Slurm allocated,
+  which is the only way to keep pods off native jobs' cores.
+
+```yaml
+# slurm-bridge values.yaml
+schedulerConfig:
+  mcsLabel: ""
+  nodeSharing: coResident
+```
+
+Slurm must schedule memory, confine native jobs to their cores and memory, and
+never place two jobs on the same core. Reserve system cores explicitly:
+
+```conf
+# slurm.conf
+SelectTypeParameters=CR_Core_Memory
+TaskPlugin=task/cgroup
+NodeName=... CpuSpecList=0-1
+PartitionName=slurm-bridge ... OverSubscribe=NO
+```
+
+```conf
+# cgroup.conf
+ConstrainCores=yes
+ConstrainRAMSpace=yes
+```
+
+Configure kubelet on each hybrid node to match:
+
+- Use CPU manager policy `none`. The `static` policy would hand pods cores that
+  Slurm allocated to native jobs.
+- Set `reservedSystemCPUs` to the node's Slurm `CpuSpecList`, so both sides
+  reserve the same cores.
+- Slurm's schedulable CPU and memory (`RealMemory` minus `MemSpecLimit`) must
+  fit in kubelet Allocatable minus the requests of pods that slurm-bridge does
+  not manage, such as DaemonSets, CNI, and DRA drivers. Set
+  `enforceNodeAllocatable: [pods]`. Otherwise a pod can get stuck after Slurm
+  allocates its job. Kubelet counts memory used by native jobs towards eviction,
+  so fix a sizing mismatch rather than lowering eviction thresholds.
+
+The node controller checks this on each hybrid node and sets the
+`SlinkySlurmResourcesFit` node condition. When it is `False`, its message gives
+both sides' numbers. Lower Slurm's `RealMemory` or `CPUs`, reserve more with
+`MemSpecLimit` or `CpuSpecList`, or reduce kubelet's reservations or the other
+pods' requests.
+
+Co-resident mode has these limitations:
+
+- Slurm's cgroups keep native jobs on their own cores and memory, and total CPU
+  and memory are never oversubscribed. A pod's CPU limit bounds how much CPU it
+  uses, not which cores it runs on, so pods can still cause noisy-neighbour
+  effects, such as cache contention and scheduling jitter, for native jobs.
+- When a pod finishes, slurm-bridge cancels its Slurm job only after the pod has
+  stopped. When Slurm ends the job first, for example at its time limit or on
+  `scancel`, Slurm can start native work on the freed cores before the pod has
+  stopped. Set [`placeholder: batch`](#batch-placeholders) to close this gap;
+  the scheduler logs a warning at startup when it is not set.
+
+### Batch Placeholders
+
+By default, the bridge submits each pod's placeholder as an external job, which
+`slurmd` never launches. When Slurm ends such a job first, for example through
+`scancel`, preemption, or its time limit, its nodes become idle at once and run
+no epilog. Native Slurm work can then start while the pod is still shutting
+down: the bridge needs up to about 30 seconds to notice that the job ended, and
+the pod's grace period and `preStop` hooks come on top of that.
+
+With `placeholder: batch`, the bridge submits the placeholder as an ordinary
+batch job instead. It runs `sleep infinity`, discards its output, and is never
+requeued. When Slurm ends it, its nodes go `COMPLETING` and run the node epilog
+[`hack/epilog-bridge-hold.sh`][epilog-bridge-hold], which holds each node until
+the pod's sandboxes on it have stopped. Admission rejects pods whose
+`terminationGracePeriodSeconds` exceeds `maxTerminationGracePeriodSeconds`
+(default 300), because the epilog only holds the node for a bounded time.
+
+```yaml
+# slurm-bridge values.yaml
+schedulerConfig:
+  placeholder: batch
+  maxTerminationGracePeriodSeconds: 300
+```
+
+Install the epilog on every node in the bridge partition, either directly in
+`slurm.conf`:
+
+```conf
+# slurm.conf
+Epilog=/path/to/epilog-bridge-hold.sh
+PrologEpilogTimeout=720
+```
+
+or, with the slurm-operator chart, as an `epilogScripts` entry, which `slurmd`
+runs from its configless cache:
+
+```sh
+helm upgrade slurm oci://ghcr.io/slinkyproject/charts/slurm --reuse-values \
+  --set-file 'epilogScripts.bridge-hold\.sh=hack/epilog-bridge-hold.sh' \
+  --set 'controller.extraConfMap.PrologEpilogTimeout[0]=720'
+```
+
+- The epilog finds the pod's sandboxes with `crictl`, so `slurmd` needs `crictl`
+  and access to the node's CRI socket (`CONTAINER_RUNTIME_ENDPOINT`, default
+  `unix:///run/containerd/containerd.sock`).
+- The epilog waits at most `HOLD_MAX` seconds (default 600) and then fails,
+  which drains the node. `HOLD_MAX` must exceed
+  `maxTerminationGracePeriodSeconds` plus about 30 seconds, and
+  `PrologEpilogTimeout` must exceed `HOLD_MAX`.
+- `slurmd` discards the epilog's output, so on failure the epilog records why in
+  the node's drain reason (`epilog-bridge-hold: job <id>: ...`).
+- Slurm runs the epilog with a minimal environment. To change `HOLD_MAX`,
+  `NO_SHOW`, `CRICTL`, `SCONTROL`, or `CONTAINER_RUNTIME_ENDPOINT`, edit the
+  defaults at the top of the script, or add an `export` line after the shebang.
+- The epilog recognises a placeholder by its `slurm_bridge_gres_compatible`
+  constraint and waits up to `NO_SHOW` seconds (default 60) for its pod sandbox
+  to appear. It releases the nodes of other jobs at once.
+- `PrologFlags=Alloc` is optional. Slurm 26.05 already runs the epilog on every
+  node of a multi-node placeholder without it.
+
+This has costs:
+
+- While a pod shuts down, the whole node waits, not only the pod's cores.
+- A placeholder that ends before its pod sandbox exists keeps the node
+  `COMPLETING` for `NO_SHOW` seconds, even if no pod ever starts there.
+- The batch job runs as its Slurm user (`SlurmUser` unless the
+  `slurmjob.slinky.slurm.net/user-id` annotation is set), who must exist on the
+  node. If the launch fails, Slurm holds the job and drains the node.
+- If the bridge is down for longer than `HOLD_MAX`, nodes whose placeholder ends
+  in that time are drained.
+
 <!-- Links -->
 
+[epilog-bridge-hold]: ../hack/epilog-bridge-hold.sh
 [job-submit]: https://slurm.schedmd.com/job_submit_plugins.html
 [mcs]: https://slurm.schedmd.com/mcs.html
