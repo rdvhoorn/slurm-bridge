@@ -11,10 +11,17 @@ hybrid slurmd nodes, on 2026-10-09 and 2026-10-10.
 | batch placeholder | `feat/batch-placeholder` | full | 113 tests, 0 failures |
 | co-resident + batch | merged `main` | full | 118 tests; all pass after the hold-check fix below |
 | upstream hybrid (flags off) | merged `main` | full | 111 tests, 0 failures |
+| co-resident + batch | `main` + upstream `b9dbf86` | full | 125 tests, 0 failures |
+| upstream hybrid (flags off) | `main` + upstream `b9dbf86` | full | 115 tests, 0 failures |
 
 Skips in every mode: the three `v1alpha2` PodGroup workloads (API not served)
 and the NVIDIA GPU test (no `MOCK_NVML`). `Hybrid MCS isolation` skips in
 co-resident mode, by design.
+
+Upstream `b9dbf86` adds CompositePodGroups, submitted as Slurm hetjobs. Its
+`CompositePodGroup scheduling` test passes with co-resident sharing and batch
+placeholders both on: every hetjob component gets the same sharing and batch
+settings as a single job.
 
 ## Findings
 

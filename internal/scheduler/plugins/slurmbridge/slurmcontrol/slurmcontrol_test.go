@@ -6,6 +6,7 @@ package slurmcontrol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
+	"k8s.io/utils/lru"
 	"k8s.io/utils/ptr"
 
 	api "github.com/SlinkyProject/slurm-client/api/v0044"
@@ -228,9 +230,10 @@ func Test_realSlurmControl_DeleteJob(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &realSlurmControl{
-				Client:    tt.fields.Client,
-				mcsLabel:  tt.fields.mcsLabel,
-				partition: tt.fields.partition,
+				lastUpdate: lru.New(10),
+				Client:     tt.fields.Client,
+				mcsLabel:   tt.fields.mcsLabel,
+				partition:  tt.fields.partition,
 			}
 			if err := r.DeleteJob(tt.args.ctx, tt.args.pod); (err != nil) != tt.wantErr {
 				t.Errorf("realSlurmControl.DeleteJob() error = %v, wantErr %v", err, tt.wantErr)
@@ -378,7 +381,8 @@ func Test_realSlurmControl_GetJobsForPods(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &realSlurmControl{
-				Client: tt.fields.Client,
+				lastUpdate: lru.New(10),
+				Client:     tt.fields.Client,
 			}
 			got, err := r.GetJobsForPods(tt.args.ctx)
 			if (err != nil) != tt.wantErr {
@@ -614,8 +618,9 @@ func Test_realSlurmControl_GetJob(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &realSlurmControl{
-				Client:    tt.fields.Client,
-				partition: tt.fields.partition,
+				lastUpdate: lru.New(10),
+				Client:     tt.fields.Client,
+				partition:  tt.fields.partition,
 			}
 			got, err := r.GetJob(tt.args.ctx, tt.args.pod)
 			if (err != nil) != tt.wantErr {
@@ -631,6 +636,7 @@ func Test_realSlurmControl_GetJob(t *testing.T) {
 
 func Test_realSlurmControl_SubmitJob(t *testing.T) {
 	pod := st.MakePod().Name("foo").Namespace("slurm-bridge").Obj()
+	secondPod := st.MakePod().Name("foo2").Namespace("slurm-bridge").Obj()
 	slurmJobIR := func(jobInfo slurmjobir.SlurmJobIRJobInfo) *slurmjobir.SlurmJobIR {
 		return &slurmjobir.SlurmJobIR{
 			Components: []slurmjobir.SlurmJobComponent{{
@@ -1026,10 +1032,55 @@ func Test_realSlurmControl_SubmitJob(t *testing.T) {
 			},
 			want: []int32{1},
 		},
+		{
+			name: "Submit heterogeneous job",
+			fields: fields{
+				Client: func() client.Client {
+					f := interceptor.Funcs{
+						Create: func(ctx context.Context, obj object.Object, req any, opts ...client.CreateOption) error {
+							obj.(*slurmtypes.V0044JobInfo).JobId = ptr.To(int32(100))
+							obj.(*slurmtypes.V0044JobInfo).HetJobIdSet = ptr.To("100-101")
+							jobSubmit := req.(api.V0044JobSubmitReq)
+							if jobSubmit.Job != nil || jobSubmit.Jobs == nil {
+								return fmt.Errorf("expected heterogeneous Jobs request, got %#v", jobSubmit)
+							}
+							jobs := *jobSubmit.Jobs
+							if len(jobs) != 2 {
+								return fmt.Errorf("len(Jobs) = %d, want 2", len(jobs))
+							}
+							if ptr.Deref(jobs[0].Name, "") != "first" || ptr.Deref(jobs[1].Name, "") != "second" {
+								return fmt.Errorf("job names = %q, %q; want first, second", ptr.Deref(jobs[0].Name, ""), ptr.Deref(jobs[1].Name, ""))
+							}
+							return nil
+						},
+					}
+					return fake.NewClientBuilder().
+						WithInterceptorFuncs(f).
+						Build()
+				}(),
+			},
+			args: args{
+				ctx: context.Background(),
+				pod: pod.DeepCopy(),
+				slurmJobIR: &slurmjobir.SlurmJobIR{Components: []slurmjobir.SlurmJobComponent{
+					{
+						JobInfo: slurmjobir.SlurmJobIRJobInfo{JobName: ptr.To("first")},
+						Pods:    corev1.PodList{Items: []corev1.Pod{*pod.DeepCopy()}},
+					},
+					{
+						JobInfo: slurmjobir.SlurmJobIRJobInfo{JobName: ptr.To("second")},
+						Pods:    corev1.PodList{Items: []corev1.Pod{*secondPod.DeepCopy()}},
+					},
+				}},
+			},
+			want:    []int32{100, 101},
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &realSlurmControl{
+				lastUpdate:       lru.New(10),
 				Client:           tt.fields.Client,
 				mcsLabel:         tt.fields.mcsLabel,
 				partition:        tt.fields.partition,
@@ -1079,6 +1130,7 @@ func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 			}
 			updates := 0
 			r := &realSlurmControl{
+				lastUpdate:       lru.New(10),
 				mcsLabel:         tt.mcsLabel,
 				coResident:       tt.coResident,
 				batchPlaceholder: tt.batchPlaceholder,
@@ -1137,38 +1189,6 @@ func Test_realSlurmControl_UpdateJobPreservesSharing(t *testing.T) {
 	}
 }
 
-func Test_realSlurmControl_SubmitJobRejectsMultipleComponents(t *testing.T) {
-	createCalls := 0
-	f := interceptor.Funcs{
-		Create: func(ctx context.Context, obj object.Object, req any, opts ...client.CreateOption) error {
-			createCalls++
-			return nil
-		},
-	}
-	r := &realSlurmControl{
-		Client: fake.NewClientBuilder().
-			WithInterceptorFuncs(f).
-			Build(),
-	}
-	slurmJobIR := &slurmjobir.SlurmJobIR{
-		Components: []slurmjobir.SlurmJobComponent{
-			{Pods: corev1.PodList{Items: []corev1.Pod{*st.MakePod().Name("pod-1").Namespace("slurm-bridge").Obj()}}},
-			{Pods: corev1.PodList{Items: []corev1.Pod{*st.MakePod().Name("pod-2").Namespace("slurm-bridge").Obj()}}},
-		},
-	}
-
-	jobIDs, err := r.SubmitJob(context.Background(), &slurmJobIR.Components[0].Pods.Items[0], slurmJobIR)
-	if err == nil {
-		t.Error("realSlurmControl.SubmitJob() error = nil, want multi-component rejection")
-	}
-	if len(jobIDs) != 0 {
-		t.Errorf("realSlurmControl.SubmitJob() job IDs = %v, want none", jobIDs)
-	}
-	if createCalls != 0 {
-		t.Errorf("realSlurmControl.SubmitJob() Create calls = %d, want 0", createCalls)
-	}
-}
-
 func TestPartitionOversubscribes(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1221,9 +1241,10 @@ func TestNewControl(t *testing.T) {
 				partition: "slurm-bridge",
 			},
 			want: &realSlurmControl{
-				Client:    fake.NewFakeClient(),
-				mcsLabel:  "kubernetes",
-				partition: "slurm-bridge",
+				lastUpdate: lru.New(10000),
+				Client:     fake.NewFakeClient(),
+				mcsLabel:   "kubernetes",
+				partition:  "slurm-bridge",
 			},
 		},
 		{
@@ -1234,6 +1255,7 @@ func TestNewControl(t *testing.T) {
 				opts:      []Option{WithCoResident()},
 			},
 			want: &realSlurmControl{
+				lastUpdate: lru.New(10000),
 				Client:     fake.NewFakeClient(),
 				partition:  "slurm-bridge",
 				coResident: true,
@@ -1248,6 +1270,7 @@ func TestNewControl(t *testing.T) {
 				opts:      []Option{WithBatchPlaceholder()},
 			},
 			want: &realSlurmControl{
+				lastUpdate:       lru.New(10000),
 				Client:           fake.NewFakeClient(),
 				mcsLabel:         "kubernetes",
 				partition:        "slurm-bridge",
@@ -1384,9 +1407,10 @@ func Test_realSlurmControl_GetNodeNames(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &realSlurmControl{
-				Client:    tt.fields.Client,
-				mcsLabel:  tt.fields.mcsLabel,
-				partition: tt.fields.partition,
+				lastUpdate: lru.New(10),
+				Client:     tt.fields.Client,
+				mcsLabel:   tt.fields.mcsLabel,
+				partition:  tt.fields.partition,
 			}
 			got, err := r.GetNodeNames(tt.args.ctx, tt.args.partition)
 			if (err != nil) != tt.wantErr {
@@ -1594,9 +1618,10 @@ func Test_realSlurmControl_GetResources(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &realSlurmControl{
-				Client:    tt.fields.Client,
-				mcsLabel:  tt.fields.mcsLabel,
-				partition: tt.fields.partition,
+				lastUpdate: lru.New(10),
+				Client:     tt.fields.Client,
+				mcsLabel:   tt.fields.mcsLabel,
+				partition:  tt.fields.partition,
 			}
 			got, err := r.GetResources(tt.args.ctx, tt.args.pod, tt.args.nodeName)
 			if (err != nil) != tt.wantErr {
@@ -1607,5 +1632,57 @@ func Test_realSlurmControl_GetResources(t *testing.T) {
 				t.Errorf("realSlurmControl.GetResources() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func Test_realSlurmControl_UpdateJobSkipsUnchanged(t *testing.T) {
+	ctx := context.Background()
+	pod := st.MakePod().Name("foo").Namespace("slurm-bridge").
+		Labels(map[string]string{wellknown.LabelExternalJobId: "7"}).Obj()
+	jobIR := func(exc ...string) *slurmjobir.SlurmJobIR {
+		return &slurmjobir.SlurmJobIR{Components: []slurmjobir.SlurmJobComponent{{
+			JobInfo: slurmjobir.SlurmJobIRJobInfo{ExcNodes: exc},
+			Pods:    corev1.PodList{Items: []corev1.Pod{*pod.DeepCopy()}},
+		}}}
+	}
+	updates := 0
+	failUpdate := false
+	r := &realSlurmControl{lastUpdate: lru.New(10), Client: fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(context.Context, object.Object, any, ...client.UpdateOption) error {
+			updates++
+			if failUpdate {
+				return errors.New("update applied but read back failed")
+			}
+			return nil
+		},
+		Delete: func(context.Context, object.Object, ...client.DeleteOption) error { return nil },
+	}).Build()}
+
+	for i, step := range []struct {
+		ir     *slurmjobir.SlurmJobIR
+		delete bool
+		fail   bool
+		want   int
+	}{
+		{ir: jobIR(), want: 1},
+		{ir: jobIR(), want: 1},
+		{ir: jobIR("node2"), want: 2},
+		{ir: jobIR("node2"), delete: true, want: 3},
+		// A failed update may still have reached Slurm, so the next request is resent.
+		{ir: jobIR(), fail: true, want: 4},
+		{ir: jobIR("node2"), want: 5},
+	} {
+		if step.delete {
+			if err := r.DeleteJob(ctx, pod); err != nil {
+				t.Fatal(err)
+			}
+		}
+		failUpdate = step.fail
+		if _, err := r.UpdateJob(ctx, pod, step.ir); (err != nil) != step.fail {
+			t.Fatalf("step %d: err = %v, want failure %v", i, err, step.fail)
+		}
+		if updates != step.want {
+			t.Fatalf("step %d: updates = %d, want %d", i, updates, step.want)
+		}
 	}
 }

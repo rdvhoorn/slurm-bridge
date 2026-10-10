@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -43,4 +44,11 @@ func GetMemoryFromQuantity(quantity *resource.Quantity) int64 {
 		mib++
 	}
 	return mib
+}
+
+func getFirstPod(p corev1.PodList) *corev1.Pod {
+	if len(p.Items) > 0 {
+		return &p.Items[0]
+	}
+	return nil
 }
