@@ -35,10 +35,9 @@ This project enables the best of both workload managers. It contains a
 for co-location of Kubernetes and Slurm workloads within the same cluster. This
 means the same hardware can be used to run both traditional HPC and cloud-like
 workloads, reducing operating costs. On hybrid nodes, the hardware is shared
-over time unless co-resident mode is enabled: a physical node must not run
-native Slurm user workloads and Slurm-bridge-managed Kubernetes user workloads
-simultaneously. Kubernetes and Slurm system daemons are expected to remain
-co-located on those nodes.
+over time: a physical node must not run native Slurm user workloads and
+Slurm-bridge-managed Kubernetes user workloads simultaneously. Kubernetes and
+Slurm system daemons are expected to remain co-located on those nodes.
 
 Using `slurm-bridge`, workloads can be submitted from within a Kubernetes
 context as a `Pod`, `PodGroup`, `Job`, `JobSet`, or `LeaderWorkerSet` and from a
@@ -98,9 +97,8 @@ with the first supporting patch version.
 
 ## Limitations
 
-- Unless co-resident mode is enabled, bridge jobs use exclusive, whole-node
-  allocations by default, and workloads that request non-exclusive placement
-  always use Slurm MCS workload isolation.
+- Bridge jobs use exclusive, whole-node allocations by default. Workloads that
+  request non-exclusive placement always use Slurm MCS workload isolation.
 - Supports [DRA Driver CPU][dra-driver-cpu] for CPUs, plus indexed GPU and
   accelerator drivers mapped to Slurm GRES through configured device profiles.
   The chart includes profiles for [DRA Example Driver][dra-example-driver] and

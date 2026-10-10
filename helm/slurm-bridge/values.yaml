@@ -96,7 +96,7 @@ schedulerConfig:
   # -- (string) Set the kind of Slurm job submitted for each pod: `external`
   # (the default when unset) or `batch`. Batch placeholders need a Slurm node
   # epilog that holds the node until the pod has stopped.
-  # Ref: https://github.com/SlinkyProject/slurm-bridge/blob/main/docs/config.md#batch-placeholders
+  # See docs/coresidency.md.
   placeholder: null
   # -- (integer) Set the largest pod `terminationGracePeriodSeconds` admission
   # accepts with batch placeholders. Defaults to 300 when unset.
