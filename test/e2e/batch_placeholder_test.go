@@ -432,9 +432,10 @@ func (h *batchHoldTest) jobStartTime(ctx context.Context, output string) (time.T
 	return time.Unix(seconds, 0), nil
 }
 
-// assertHeldUntilPodsGone queues a native job on each pod's node, cancels the
-// placeholder, and checks that each node stays COMPLETING, with its native
-// job pending, until that node's pod is gone.
+// assertHeldUntilPodsGone queues an exclusive native job on each pod's node,
+// cancels the placeholder, and checks that each node stays COMPLETING, with its
+// native job pending, until that node's pod is gone. The native job asks for
+// the whole node, so it also waits behind a co-resident placeholder.
 func (h *batchHoldTest) assertHeldUntilPodsGone(ctx context.Context, jobID string, pods ...*corev1.Pod) {
 	t := h.t
 	t.Helper()
@@ -442,9 +443,8 @@ func (h *batchHoldTest) assertHeldUntilPodsGone(ctx context.Context, jobID strin
 	for _, pod := range pods {
 		node := pod.Spec.NodeName
 		natives[node] = h.sbatch(ctx, "--job-name="+pod.Name+"-native", "--partition="+slurmBridgePartition,
-			"--nodelist="+node, "--nodes=1", "--ntasks=1", "--cpus-per-task=1", "--mem=100M",
+			"--nodelist="+node, "--nodes=1", "--exclusive", "--ntasks=1", "--cpus-per-task=1", "--mem=100M",
 			"--time=5", "--chdir=/tmp", "--output=/dev/null", "--wrap=true")
-		// The placeholder allocates the node exclusively.
 		if state, err := h.jobState(ctx, natives[node]); err != nil || state != "PENDING" {
 			t.Fatalf("native job %s on %s is %q, want PENDING behind placeholder %s: %v", natives[node], node, state, jobID, err)
 		}
