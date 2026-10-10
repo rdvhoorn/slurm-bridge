@@ -107,8 +107,7 @@ variables:
 - `schedulerConfig.mcsLabel` - sets the MCS category used whenever a workload
   requests non-exclusive placement. A non-empty label and the additional Slurm
   configuration are required, as described in
-  [Hybrid Workload Isolation](config.md#hybrid-workload-isolation), unless
-  [co-resident mode](config.md#co-resident-nodes) is enabled.
+  [Hybrid Workload Isolation](config.md#hybrid-workload-isolation).
 - `sharedConfig.slurmRestApi` - the URL used by `slurm-bridge` to interact with
   the Slurm REST API. Changing this value may be necessary if you run the REST
   API on a different URL or port. The default value of this variable is

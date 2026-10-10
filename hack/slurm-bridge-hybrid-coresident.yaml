@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) SchedMD LLC.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Co-resident node sharing (docs/config.md#co-resident-nodes). Layered after
+# Co-resident node sharing (docs/coresidency.md). Layered after
 # slurm-bridge-hybrid.yaml when SLURM_NODE_SHARING=coResident.
 configFiles:
   # Replaces the operator's generated cgroup.conf, so repeat its settings.

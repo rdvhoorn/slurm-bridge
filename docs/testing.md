@@ -40,24 +40,6 @@ SLURM_NODE_MODE=hybrid \
 make kind-start test-e2e
 ```
 
-Hybrid nodes can also run with
-[co-resident node sharing](config.md#co-resident-nodes). Pass the same variables
-to `make deploy` and `make test-e2e` on that cluster:
-
-```sh
-KIND_CLUSTER_NAME=slurm-bridge-coresident SLURM_NODE_MODE=hybrid \
-SLURM_NODE_SHARING=coResident make kind-start test-e2e
-```
-
-[Batch placeholders](config.md#batch-placeholders) need hybrid nodes and their
-own cluster too. This also installs the hold epilog with a 120 s `HOLD_MAX`:
-
-```sh
-KIND_CLUSTER_NAME=slurm-bridge-batch \
-SLURM_NODE_MODE=hybrid SLURM_PLACEHOLDER=batch \
-make kind-start test-e2e
-```
-
 Select another supported Kubernetes version with `KUBERNETES_VERSION`:
 
 ```sh
@@ -76,8 +58,6 @@ uses it to verify that the cluster actually contains external nodes or
 DaemonSet-mode hybrid `slurmd` pods, as requested. Hybrid runs also include a
 native `sbatch` feature labeled `slurm-node-mode=hybrid`, which verifies that a
 job submitted directly to Slurm completes on one of those hybrid workers.
-`SLURM_NODE_SHARING=coResident` replaces the hybrid MCS isolation feature with
-co-resident sharing features.
 
 After the serial readiness check, independent workload features run in parallel.
 Slurm may queue jobs when the suite temporarily asks for more nodes than are
