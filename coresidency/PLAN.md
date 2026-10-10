@@ -342,3 +342,20 @@ Added:
 6. Upstream PR for the sharing patch. Propose the delayed release separately.
    Update [#48](https://github.com/SlinkyProject/slurm-bridge/issues/48).
 7. Static GPUs/MIG, using upstream's GRES↔DRA mapping.
+
+### Status (2026-10-10)
+
+- **M1–M4 done.** Upstream baseline, spike, sharing and delayed release are
+  merged into the fork's `main`, with e2e green in upstream, co-resident, batch
+  and combined mode (`notes/baseline.md`, `notes/spike.md`, `notes/e2e.md`).
+- **M5 code done**, validation open: the `SlinkySlurmResourcesFit` condition and
+  `requireCPUDevice`. Still to do on real hybrid nodes: reserved cores matched
+  with kubelet, `requireCPUDevice` with init containers, and isolation itself.
+- **Open:** cpu-per-task and mem-per-node annotations on owning workload objects
+  bypass the co-resident admission check; a containerized slurmd is an eviction
+  risk for native jobs (§4.3).
+- **Line count:** about 450 added non-test Go lines outside `test/`, comments
+  included (sharing and M5: 341, delayed release: 106), above the ~300 in §2.
+  Most of it is admission checks and the sizing condition; the job-description
+  changes of each series are about 30 lines.
+
