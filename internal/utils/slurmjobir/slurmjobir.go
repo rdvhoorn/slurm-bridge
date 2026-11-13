@@ -39,9 +39,10 @@ var (
 )
 
 type SlurmJobComponent struct {
-	ObjectMeta metav1.PartialObjectMetadata
-	JobInfo    SlurmJobIRJobInfo
-	Pods       corev1.PodList
+	ObjectMeta           metav1.PartialObjectMetadata
+	JobInfo              SlurmJobIRJobInfo
+	Pods                 corev1.PodList
+	MemPerNodeRaisedFrom *int64
 }
 
 func (s SlurmJobComponent) GetNamespacedName() types.NamespacedName {
@@ -226,8 +227,12 @@ func TranslateToSlurmJobIR(c client.Client, registry *dra.Registry, workloadAPI 
 			return nil, err
 		}
 	}
-	err = t.applySlurmAnnotations(ctx, slurmJobIR, rootPOM, pg)
-	return slurmJobIR, err
+	derived := memPerNode(slurmJobIR)
+	if err := t.applySlurmAnnotations(ctx, slurmJobIR, rootPOM, pg); err != nil {
+		return slurmJobIR, err
+	}
+	raiseMemPerNode(slurmJobIR, derived)
+	return slurmJobIR, nil
 }
 
 // AllPods returns all pods for the provided SlurmJobIR

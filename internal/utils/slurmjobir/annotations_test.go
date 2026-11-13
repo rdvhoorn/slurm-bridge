@@ -238,3 +238,29 @@ func Test_parseUserAnnotations(t *testing.T) {
 		})
 	}
 }
+
+func Test_raiseMemPerNode(t *testing.T) {
+	tests := []struct {
+		name       string
+		derived    *int64
+		annotated  *int64
+		want       *int64
+		wantRaised *int64
+	}{
+		{name: "Annotation below Pods is raised", derived: ptr.To[int64](1024), annotated: ptr.To[int64](512), want: ptr.To[int64](1024), wantRaised: ptr.To[int64](512)},
+		{name: "Annotation above Pods is kept", derived: ptr.To[int64](1024), annotated: ptr.To[int64](2048), want: ptr.To[int64](2048)},
+		{name: "Zero means all node memory", derived: ptr.To[int64](1024), annotated: ptr.To[int64](0), want: ptr.To[int64](0)},
+		{name: "Pods without memory keep annotation", annotated: ptr.To[int64](512), want: ptr.To[int64](512)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ir := &SlurmJobIR{Components: []SlurmJobComponent{{JobInfo: SlurmJobIRJobInfo{MemPerNode: tt.annotated}}}}
+			raiseMemPerNode(ir, []*int64{tt.derived})
+			got := ir.Components[0]
+			if !apiequality.Semantic.DeepEqual(got.JobInfo.MemPerNode, tt.want) || !apiequality.Semantic.DeepEqual(got.MemPerNodeRaisedFrom, tt.wantRaised) {
+				t.Errorf("raiseMemPerNode() MemPerNode = %v, MemPerNodeRaisedFrom = %v, want %v, %v",
+					ptr.Deref(got.JobInfo.MemPerNode, -1), ptr.Deref(got.MemPerNodeRaisedFrom, -1), ptr.Deref(tt.want, -1), ptr.Deref(tt.wantRaised, -1))
+			}
+		})
+	}
+}

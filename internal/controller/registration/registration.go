@@ -83,6 +83,7 @@ func (r *Reconciler) register(ctx context.Context, key Request, pod *corev1.Pod,
 	switch kind := classifyRejection(err); {
 	case err == nil:
 		r.clearRegistrationEvent(key)
+		r.memPerNodeEvents(ir)
 	case kind == rejectRequest:
 		r.registrationEvent(key, corev1.EventTypeWarning, "SlurmRegistrationRejected", err.Error())
 		return reconcile.Result{RequeueAfter: requestRetry}, nil

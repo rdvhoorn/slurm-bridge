@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/SlinkyProject/slurm-bridge/internal/utils/slurmjobir"
@@ -84,5 +85,27 @@ func TestRegistrationEvents(t *testing.T) {
 	}
 	if event := recorder.events[1]; event.Type != corev1.EventTypeWarning || event.Reason != "SlurmRegistrationFailed" || event.Message != failure.Error() || event.InvolvedObject.UID != group.UID {
 		t.Fatalf("unexpected failure event: %+v", event)
+	}
+}
+
+func TestMemPerNodeRaisedEvent(t *testing.T) {
+	pods := []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "a", UID: "a-uid"}},
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "b", UID: "b-uid"}},
+	}
+	ir := &slurmjobir.SlurmJobIR{Components: []slurmjobir.SlurmJobComponent{{
+		JobInfo:              slurmjobir.SlurmJobIRJobInfo{MemPerNode: ptr.To[int64](1024)},
+		MemPerNodeRaisedFrom: ptr.To[int64](512),
+		Pods:                 corev1.PodList{Items: pods},
+	}}}
+	recorder := &registrationRecorder{}
+	(&Reconciler{eventRecorder: recorder}).memPerNodeEvents(ir)
+	if len(recorder.events) != len(pods) {
+		t.Fatalf("events = %+v, want one per Pod", recorder.events)
+	}
+	for i, event := range recorder.events {
+		if event.Type != corev1.EventTypeWarning || event.Reason != "MemPerNodeRaised" || event.InvolvedObject.Kind != "Pod" || event.InvolvedObject.UID != pods[i].UID {
+			t.Errorf("unexpected event: %+v", event)
+		}
 	}
 }
