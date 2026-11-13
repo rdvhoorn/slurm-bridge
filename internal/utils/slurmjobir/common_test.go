@@ -107,11 +107,25 @@ func Test_GetMemoryFromQuantity(t *testing.T) {
 			},
 			want: 1,
 		},
+		{
+			name: "Partial MiB rounds up",
+			args: args{
+				input: *resource.NewQuantity(1024*1024+1, resource.DecimalSI),
+			},
+			want: 2,
+		},
+		{
+			name: "Decimal megabytes round up",
+			args: args{
+				input: resource.MustParse("100M"),
+			},
+			want: 96,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := GetMemoryFromQuantity(&tt.args.input); got != tt.want {
-				t.Errorf("ParseSlurmJobId() = %d, want %d", got, tt.want)
+				t.Errorf("GetMemoryFromQuantity() = %d, want %d", got, tt.want)
 			}
 		})
 	}

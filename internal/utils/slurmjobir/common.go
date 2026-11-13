@@ -34,9 +34,11 @@ func ParseSlurmJobId(input string) int32 {
 	return int32(out) //nolint:gosec // disable G115
 }
 
+// GetMemoryFromQuantity converts a memory quantity to MiB. Partial MiB are
+// rounded up so the Slurm job never reserves less memory than the Pod may use.
 func GetMemoryFromQuantity(quantity *resource.Quantity) int64 {
 	val := quantity.Value()
-	return val / 1048576 // value for 1024x1024 to follow what we need for slurm job IR
+	return (val + 1048576 - 1) / 1048576
 }
 
 func getFirstPod(p corev1.PodList) *corev1.Pod {
