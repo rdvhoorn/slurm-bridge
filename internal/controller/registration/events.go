@@ -9,6 +9,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/SlinkyProject/slurm-bridge/internal/utils/slurmjobir"
+	"github.com/SlinkyProject/slurm-bridge/internal/wellknown"
 )
 
 const registrationEventReminder = 5 * time.Minute
@@ -40,6 +43,26 @@ func (r *Reconciler) registrationEvent(key Request, eventType, reason, message s
 	}
 	r.eventHistory.Set(key, event, registrationEventReminder)
 	r.eventRecorder.Eventf(ref, eventType, reason, "%s", message)
+}
+
+// memPerNodeEvents warns on each Pod, once per submission, when a mem-per-node
+// annotation was below the Pods' memory and the Slurm job reserves the Pods'
+// memory instead.
+func (r *Reconciler) memPerNodeEvents(ir *slurmjobir.SlurmJobIR) {
+	if r.eventRecorder == nil {
+		return
+	}
+	for _, component := range ir.Components {
+		if component.MemPerNodeRaisedFrom == nil || component.JobInfo.MemPerNode == nil {
+			continue
+		}
+		for _, pod := range component.Pods.Items {
+			ref := &corev1.ObjectReference{APIVersion: "v1", Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID}
+			r.eventRecorder.Eventf(ref, corev1.EventTypeWarning, "MemPerNodeRaised",
+				"%s annotation (%d MiB) is below the memory this Pod may use; the Slurm job reserves %d MiB instead",
+				wellknown.AnnotationMemPerNode, *component.MemPerNodeRaisedFrom, *component.JobInfo.MemPerNode)
+		}
+	}
 }
 
 func (r *Reconciler) clearRegistrationEvent(key Request) {

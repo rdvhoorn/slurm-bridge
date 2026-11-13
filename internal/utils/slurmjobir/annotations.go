@@ -10,6 +10,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/SlinkyProject/slurm-bridge/internal/utils/timelimit"
@@ -104,8 +105,7 @@ func parseUserAnnotations(slurmJobComponent *SlurmJobComponent, anno map[string]
 			if err != nil {
 				return err
 			}
-			val := rs.Value()
-			val /= 1048576 // value for 1024x1024 to follow what we need for slurm job IR
+			val := GetMemoryFromQuantity(&rs)
 			slurmJobComponent.JobInfo.MemPerNode = &val
 		case wellknown.AnnotationMinNodes:
 			num, err := ConvStrTo32(value)
@@ -138,4 +138,29 @@ func parseUserAnnotations(slurmJobComponent *SlurmJobComponent, anno map[string]
 		}
 	}
 	return nil
+}
+
+// memPerNode returns each component's memory in MiB before annotations apply.
+func memPerNode(slurmJobIR *SlurmJobIR) []*int64 {
+	mem := make([]*int64, len(slurmJobIR.Components))
+	for i, component := range slurmJobIR.Components {
+		if component.JobInfo.MemPerNode != nil {
+			mem[i] = ptr.To(*component.JobInfo.MemPerNode)
+		}
+	}
+	return mem
+}
+
+// raiseMemPerNode keeps a mem-per-node annotation from reserving less memory
+// than the component's Pods may use.
+func raiseMemPerNode(slurmJobIR *SlurmJobIR, derived []*int64) {
+	for i, mem := range derived {
+		component := &slurmJobIR.Components[i]
+		annotated := component.JobInfo.MemPerNode
+		if mem == nil || annotated == nil || *annotated == 0 || *annotated >= *mem {
+			continue
+		}
+		component.MemPerNodeRaisedFrom = annotated
+		component.JobInfo.MemPerNode = ptr.To(*mem)
+	}
 }
